@@ -6,3 +6,5 @@ models/__pycache__/
 .coverage
 
 coverage.xml
+
+core/__pycache__/

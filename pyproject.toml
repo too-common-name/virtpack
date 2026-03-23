@@ -57,7 +57,8 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "."
-files = ["models/", "core/", "algorithms/", "cli/", "io/", "report/"]
+explicit_package_bases = true
+files = ["models/", "core/", "algorithms/", "cli/", "io/", "report/", "tests/"]
 
 [[tool.mypy.overrides]]
 module = ["pandas", "openpyxl"]

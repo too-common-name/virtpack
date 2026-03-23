@@ -160,9 +160,9 @@ class TestScoreNode:
         score = score_node(n, weights)
         # balance=1.0, spread=0.5, pod_headroom=0.8, frag=0.25
         expected = (
-            0.3 * 1.0   # balance
-            + 0.3 * 0.5   # spread
-            + 0.1 * 0.8   # pod_headroom
+            0.3 * 1.0  # balance
+            + 0.3 * 0.5  # spread
+            + 0.1 * 0.8  # pod_headroom
             - 0.3 * 0.25  # fragmentation
         )
         assert score == pytest.approx(expected)

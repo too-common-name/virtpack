@@ -265,6 +265,7 @@ class TestRunPlacement:
 
     def test_placement_is_deterministic(self) -> None:
         """Running twice with same inputs produces identical placement."""
+
         def do_run() -> dict[str, str]:
             state = ClusterState([_inv_node(cpu_total=80.0, memory_total=300_000.0)])
             vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]

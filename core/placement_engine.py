@@ -155,11 +155,7 @@ def _score_candidates(
         if next_vm is not None:
             # Tentatively place current VM
             state.place(vm, node)
-            lookahead = (
-                score_node(node, weights)
-                if node.fits(next_vm)
-                else _LOOKAHEAD_PENALTY
-            )
+            lookahead = score_node(node, weights) if node.fits(next_vm) else _LOOKAHEAD_PENALTY
             # Rollback
             state.unplace(vm, node)
 

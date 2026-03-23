@@ -321,3 +321,38 @@ class TestRunPlacement:
         assert len(cat_nodes) == 3
         ids = sorted(n.id for n in cat_nodes)
         assert ids == ["big-01", "big-02", "big-03"]
+
+    # ── Inventory-only mode (no catalog) ─────────────────────────────
+
+    def test_inventory_only_all_fit(self) -> None:
+        """No catalog: VMs that fit on inventory are placed normally."""
+        state = ClusterState([_inv_node(cpu_total=80.0, memory_total=300_000.0)])
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(5)]
+
+        result = run_placement(vms=vms, state=state, config=_config(), catalog=None)
+
+        assert result.unplaced == []
+        assert result.state.total_placed_vms == 5
+        assert len(result.state.catalog_nodes) == 0
+
+    def test_inventory_only_overflow_goes_to_unplaced(self) -> None:
+        """No catalog: VMs that don't fit are unplaced (no expansion)."""
+        small_inv = _inv_node(cpu_total=3.0, memory_total=5000.0, pods_total=1)
+        state = ClusterState([small_inv])
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(3)]
+
+        result = run_placement(vms=vms, state=state, config=_config(), catalog=None)
+
+        assert result.state.total_placed_vms == 1
+        assert len(result.unplaced) == 2
+        assert len(result.state.catalog_nodes) == 0
+
+    def test_inventory_only_no_nodes_all_unplaced(self) -> None:
+        """No catalog + no inventory = everything unplaced."""
+        state = ClusterState()
+        vms = [_vm(f"v{i}") for i in range(3)]
+
+        result = run_placement(vms=vms, state=state, config=_config(), catalog=None)
+
+        assert result.state.total_placed_vms == 0
+        assert len(result.unplaced) == 3

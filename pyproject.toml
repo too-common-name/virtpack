@@ -19,6 +19,7 @@ dev = [
     "ruff>=0.11,<1",
     "mypy>=1.15,<2",
     "pandas-stubs>=2.2,<3",
+    "types-PyYAML>=6.0,<7",
 ]
 
 # ─── Ruff (linter + formatter) ────────────────────────────────────────
@@ -48,7 +49,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["models", "core", "algorithms", "io", "cli", "report"]
+known-first-party = ["models", "core", "algorithms", "loaders", "cli", "report"]
 
 # ─── Mypy (static type checker) ───────────────────────────────────────
 
@@ -58,7 +59,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "."
 explicit_package_bases = true
-files = ["models/", "core/", "algorithms/", "cli/", "io/", "report/", "tests/"]
+files = ["models/", "core/", "algorithms/", "cli/", "loaders/", "report/", "tests/"]
 
 [[tool.mypy.overrides]]
 module = ["pandas", "openpyxl"]
@@ -83,7 +84,7 @@ addopts = [
 # ─── Coverage ─────────────────────────────────────────────────────────
 
 [tool.coverage.run]
-source = ["models", "core", "algorithms", "cli", "io", "report"]
+source = ["models", "core", "algorithms", "cli", "loaders", "report"]
 omit = ["tests/*", "venv/*"]
 
 [tool.coverage.report]

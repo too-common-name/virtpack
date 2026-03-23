@@ -52,7 +52,7 @@ def select_profile(
 
 def expand(
     vm: VM,
-    catalog: CatalogConfig,
+    catalog: CatalogConfig | None,
     config: PlanConfig,
     next_index: int,
 ) -> Node | None:
@@ -62,17 +62,23 @@ def expand(
     The caller (PlacementEngine) is responsible for calling
     ``state.add_node(node)`` with the result.
 
+    Returns ``None`` when:
+    * ``catalog`` is ``None`` (inventory-only mode — no expansion).
+    * No catalog profile is large enough for *vm* (monster VM).
+
     Parameters
     ----------
     vm : VM
         The VM that triggered expansion (no existing node fits).
-    catalog : CatalogConfig
-        Available hardware profiles.
+    catalog : CatalogConfig | None
+        Available hardware profiles, or ``None`` for inventory-only mode.
     config : PlanConfig
         Global configuration (overheads, safety margins, limits).
     next_index : int
         1-based sequence number for the new node's ID.
     """
+    if catalog is None:
+        return None
     profile = select_profile(vm, catalog, config)
     if profile is None:
         return None

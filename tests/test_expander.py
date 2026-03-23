@@ -167,3 +167,8 @@ class TestExpand:
         assert node is not None
         assert node.profile == "cheap"
         assert node.cost_weight == pytest.approx(0.8)
+
+    def test_none_catalog_returns_none(self) -> None:
+        """Inventory-only mode: no catalog → no expansion."""
+        node = expand(_small_vm(), None, _default_config(), next_index=1)
+        assert node is None

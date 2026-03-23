@@ -53,7 +53,7 @@ def run_placement(
     vms: list[VM],
     state: ClusterState,
     config: PlanConfig,
-    catalog: CatalogConfig,
+    catalog: CatalogConfig | None = None,
 ) -> PlacementResult:
     """Execute the full placement simulation.
 
@@ -75,8 +75,10 @@ def run_placement(
         Pre-populated with inventory nodes (and any prior catalog nodes).
     config : PlanConfig
         Global configuration (weights, limits, overheads, safety).
-    catalog : CatalogConfig
-        Available catalog profiles for expansion.
+    catalog : CatalogConfig | None
+        Available catalog profiles for expansion.  ``None`` means
+        **inventory-only mode** — VMs that don't fit on existing
+        nodes are added to the unplaced list without expansion.
 
     Returns
     -------

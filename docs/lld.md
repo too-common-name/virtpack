@@ -17,7 +17,7 @@ virtpack/
     ├── algorithms/
     │   ├── scorer.py
     │   └── expander.py
-    ├── io/
+    ├── loaders/
     │   ├── rvtools_parser.py
     │   └── yaml_loader.py
     └── report/
@@ -25,7 +25,7 @@ virtpack/
         └── terminal_summary.py
 ```
 
-> **Note:** The CLI package is named `cli/` (not `cmd/`) to avoid shadowing Python's built-in `cmd` module.
+> **Note:** The CLI package is named `cli/` (not `cmd/`) and the I/O package is named `loaders/` (not `io/`) to avoid shadowing Python built-in modules.
 ------------------------------------------------------------------------
 ## 2. Key Classes & Interfaces
 

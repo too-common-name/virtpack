@@ -14,3 +14,5 @@ algorithms/__pycache__/
 cli/__pycache__/
 
 loaders/__pycache__/
+
+report/__pycache__/

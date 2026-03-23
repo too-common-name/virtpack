@@ -8,3 +8,7 @@ models/__pycache__/
 coverage.xml
 
 core/__pycache__/
+
+algorithms/__pycache__/
+
+cli/__pycache__/

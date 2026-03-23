@@ -131,25 +131,53 @@ class TestNodeFactories:
 
     def test_new_inventory_sets_cost_zero(self) -> None:
         node = Node.new_inventory(
-            id="inv-01", profile="r740",
+            profile="r740", index=1,
             cpu_total=48.0, memory_total=400000.0, pods_total=500,
         )
         assert node.cost_weight == 0.0
         assert node.is_inventory is True
+        assert node.profile == "r740"
+
+    def test_new_inventory_auto_id(self) -> None:
+        """Auto-generates '{profile}-{index:02d}'."""
+        node = Node.new_inventory(
+            profile="r740-existing", index=3,
+            cpu_total=48.0, memory_total=400000.0, pods_total=500,
+        )
+        assert node.id == "r740-existing-03"
+
+    def test_new_inventory_id_override_for_vhost(self) -> None:
+        """RVTools vHost auto-discovery provides actual ESXi hostname."""
+        node = Node.new_inventory(
+            profile="vhost-auto", index=1,
+            cpu_total=48.0, memory_total=400000.0, pods_total=500,
+            id_override="esxi-prod-07.dc1.local",
+        )
+        assert node.id == "esxi-prod-07.dc1.local"
+        assert node.profile == "vhost-auto"
 
     def test_new_catalog_sets_is_inventory_false(self) -> None:
         node = Node.new_catalog(
-            id="cat-01", profile="r760",
+            profile="r760", index=1,
             cpu_total=60.0, memory_total=800000.0, pods_total=500,
             cost_weight=1.0,
         )
         assert node.is_inventory is False
         assert node.cost_weight == 1.0
 
+    def test_new_catalog_auto_id(self) -> None:
+        """Auto-generates '{profile}-{index:02d}'."""
+        node = Node.new_catalog(
+            profile="r760-new", index=5,
+            cpu_total=60.0, memory_total=800000.0, pods_total=500,
+            cost_weight=1.0,
+        )
+        assert node.id == "r760-new-05"
+
     def test_new_catalog_rejects_zero_cost(self) -> None:
         with pytest.raises(ValueError, match="cost_weight > 0"):
             Node.new_catalog(
-                id="bad", profile="bad",
+                profile="bad", index=1,
                 cpu_total=1.0, memory_total=1.0, pods_total=1,
                 cost_weight=0.0,
             )
@@ -157,7 +185,7 @@ class TestNodeFactories:
     def test_new_catalog_rejects_negative_cost(self) -> None:
         with pytest.raises(ValueError, match="cost_weight > 0"):
             Node.new_catalog(
-                id="bad", profile="bad",
+                profile="bad", index=1,
                 cpu_total=1.0, memory_total=1.0, pods_total=1,
                 cost_weight=-1.0,
             )

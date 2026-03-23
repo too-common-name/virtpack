@@ -24,10 +24,13 @@ class Node(BaseModel):
     Construction
     ------------
     Use the factory class methods instead of the raw constructor to
-    enforce inventory/catalog invariants:
+    enforce inventory/catalog invariants and auto-generate the node id:
 
-        Node.new_inventory(...)   # cost_weight=0.0, is_inventory=True
-        Node.new_catalog(...)     # cost_weight>0,   is_inventory=False
+        Node.new_inventory(profile, index, ...)   # → "r740-existing-01"
+        Node.new_catalog(profile, index, ...)     # → "r760-new-01"
+
+    For RVTools vHost auto-discovery, pass ``id_override`` to
+    ``new_inventory`` with the actual ESXi hostname.
     """
 
     model_config = ConfigDict(strict=True)
@@ -36,12 +39,12 @@ class Node(BaseModel):
     id: str = Field(
         ...,
         min_length=1,
-        description="Unique node identifier (e.g. 'inv-r740-01', 'cat-r760-03')",
+        description="Unique node identifier (auto-generated or vHost hostname)",
     )
     profile: str = Field(
         ...,
         min_length=1,
-        description="Hardware profile name from inventory/catalog YAML",
+        description="Hardware profile name from inventory/catalog YAML (profile_name)",
     )
 
     # ── Capacity (set once at creation after normalization + safety) ────
@@ -95,18 +98,34 @@ class Node(BaseModel):
     def new_inventory(
         cls,
         *,
-        id: str,
         profile: str,
+        index: int,
         cpu_total: float,
         memory_total: float,
         pods_total: int,
+        id_override: str | None = None,
     ) -> Node:
         """Create a brownfield inventory node (cost = 0).
 
-        Enforces: ``cost_weight=0.0`` and ``is_inventory=True``.
+        Parameters
+        ----------
+        profile:
+            The ``profile_name`` from inventory YAML or an auto-derived
+            label for vHost-discovered hardware.
+        index:
+            1-based sequence number within this profile
+            (e.g. quantity=12 → indices 1..12).
+        id_override:
+            If provided, uses this as the node id instead of the
+            auto-generated name. Used for RVTools vHost auto-discovery
+            where the actual ESXi hostname is available.
+
+        Naming convention (auto):
+            ``"{profile}-{index:02d}"`` → ``"r740-existing-01"``
         """
+        node_id = id_override if id_override else f"{profile}-{index:02d}"
         return cls(
-            id=id,
+            id=node_id,
             profile=profile,
             cpu_total=cpu_total,
             memory_total=memory_total,
@@ -119,8 +138,8 @@ class Node(BaseModel):
     def new_catalog(
         cls,
         *,
-        id: str,
         profile: str,
+        index: int,
         cpu_total: float,
         memory_total: float,
         pods_total: int,
@@ -128,14 +147,25 @@ class Node(BaseModel):
     ) -> Node:
         """Create a greenfield catalog node (new purchase).
 
-        Enforces: ``is_inventory=False`` and ``cost_weight > 0``.
+        Parameters
+        ----------
+        profile:
+            The ``profile_name`` from catalog YAML.
+        index:
+            1-based sequence number for this catalog profile
+            (incremented each time the Expander creates a new node).
+        cost_weight:
+            Must be > 0.
+
+        Naming convention:
+            ``"{profile}-{index:02d}"`` → ``"r760-new-01"``
         """
         if cost_weight <= 0:
             raise ValueError(
                 f"Catalog nodes must have cost_weight > 0, got {cost_weight}"
             )
         return cls(
-            id=id,
+            id=f"{profile}-{index:02d}",
             profile=profile,
             cpu_total=cpu_total,
             memory_total=memory_total,

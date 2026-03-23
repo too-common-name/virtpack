@@ -1,0 +1,30 @@
+@startuml
+
+class VM {
+  name
+  cpu
+  memory
+  pods
+}
+
+class Node {
+  id
+  profile
+  cpu_total
+  cpu_used
+  memory_total
+  memory_used
+  pods_total
+  pods_used
+}
+
+class ClusterState {
+  nodes
+  place(vm, node)
+  unplace(vm, node)
+}
+
+VM --> Node : placed_on
+ClusterState --> Node
+
+@enduml

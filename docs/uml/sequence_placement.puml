@@ -1,0 +1,29 @@
+@startuml
+
+actor User
+participant CLI
+participant Engine
+participant State
+participant Scorer
+participant Expander
+
+User -> CLI : run
+CLI -> Engine : execute()
+
+loop each VM
+  Engine -> State : filter_nodes(vm)
+
+  alt no candidates
+    Engine -> Expander : create_node()
+    Expander -> State : add_node()
+  end
+
+  Engine -> Scorer : score(nodes)
+  Scorer --> Engine : best_node
+
+  Engine -> State : place(vm, best_node)
+end
+
+Engine -> CLI : results
+
+@enduml

@@ -73,13 +73,14 @@ Parsed from the `vInfo` sheet.
 Contains cluster-wide limits, overcommit ratios, Red Hat baseline overheads, and the tunable algorithm weights.
 
     cluster_limits:
-      max_pods_per_node: 500
+      max_pods_per_node: 250
 
     overcommit:
       cpu_ratio: 8.0
       memory_ratio: 1.0
 
     virt_overheads:
+      ht_efficiency_factor: 1.5   # HT threads ≠ full cores (Red Hat sizing guide)
       ocp_virt_core: 2.0
       ocp_virt_memory_mb: 360
       eviction_hard_mb: 100
@@ -138,10 +139,29 @@ VM CPU requests are normalized using the configured CPU overcommit ratio:
     effective_cpu = vm_cpu / cpu_ratio
 
 #### Node Normalization
-True usable node capacity is calculated by subtracting system overheads:
+True usable node capacity is calculated in two stages: first the effective CPU count is derived (accounting for hyperthreading efficiency), then system overheads are subtracted.
+
+**Stage 1 — Effective CPU (Hyperthreading Adjustment)**
+
+Hyperthreaded cores do not deliver 2× the throughput of a physical core. Per the Red Hat OpenShift Virtualization Cluster Sizing Guide, a configurable efficiency factor (default 1.5×) is applied:
+
+    if threads_per_core > 1:
+        effective_cpu = physical_cores × ht_efficiency_factor
+    else:
+        effective_cpu = physical_cores
+
+Where `physical_cores = sockets × cores_per_socket`.
+
+| `ht_efficiency_factor` | Meaning                          | Example (2s × 32c × 2t) |
+|------------------------|----------------------------------|--------------------------|
+| 2.0                    | Count every thread as full core  | 128 effective CPUs       |
+| 1.5 (default)          | Red Hat sizing guide recommended | 96 effective CPUs        |
+| 1.0                    | Ignore HT (physical cores only)  | 64 effective CPUs        |
+
+**Stage 2 — Overhead Subtraction**
 
     usable_cpu =
-        logical_cpu
+        effective_cpu
       − kubelet_reserved_cpu
       − ocp_virt_cpu
 

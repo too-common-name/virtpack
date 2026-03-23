@@ -3,6 +3,8 @@
 ## 1. Code Architecture
 ```bash
 virtpack/
+    ├── cli/
+    │   └── main.py
     ├── core/
     │   ├── cluster_state.py
     │   ├── placement_engine.py
@@ -15,39 +17,95 @@ virtpack/
     ├── algorithms/
     │   ├── scorer.py
     │   └── expander.py
-    └── io/
-        ├── rvtools_parser.py
-        └── yaml_loader.py
+    ├── io/
+    │   ├── rvtools_parser.py
+    │   └── yaml_loader.py
+    └── report/
+        ├── csv_exporter.py
+        └── terminal_summary.py
 ```
+
+> **Note:** The CLI package is named `cli/` (not `cmd/`) to avoid shadowing Python's built-in `cmd` module.
 ------------------------------------------------------------------------
 ## 2. Key Classes & Interfaces
 
 ### 2.1 Domain Models
-Using `pydantic` or Python `dataclasses` for strict typing.
+Using Pydantic V2 `BaseModel` with strict typing.
 
+#### VM (Pydantic, `strict=True`, `frozen=True`)
+```python
+class VM(BaseModel):
+    name: str               # RVTools vInfo "VM" column
+    cpu: float              # Effective vCPU (post-overcommit: vm_cpu / cpu_ratio)
+    memory_mb: float        # Memory in MB (RVTools native unit)
+    pods: int = 1           # Always 1 for KubeVirt virt-launcher
 ```
-    class VM:
-        name: str
-        cpu: float
-        memory: float
-        pods: int = 1
 
-    class Node:
-        id: str
-        profile: str
-        
-        # Resource tracking
-        cpu_total: float
-        cpu_used: float
-        memory_total: float
-        memory_used: float
-        pods_total: int
-        pods_used: int
-        
-        # Placement metadata
-        cost_weight: float
-        is_inventory: bool
+#### Node (Pydantic, `strict=True`, mutable)
+```python
+class Node(BaseModel):
+    id: str
+    profile: str
+    
+    # Capacity (set once after normalization + safety margins)
+    cpu_total: float        # Schedulable CPU (logical cores, post-overhead)
+    memory_total: float     # Schedulable memory in MB (post-overhead)
+    pods_total: int         # Max pods from cluster_limits.max_pods_per_node
+    
+    # Usage (mutated by place/unplace during placement loop)
+    cpu_used: float = 0.0
+    memory_used: float = 0.0
+    pods_used: int = 0
+    
+    # Metadata
+    cost_weight: float      # 0.0 for inventory, >0 for catalog
+    is_inventory: bool      # True = brownfield, False = greenfield
+    
+    # Derived properties (used by Scorer, HLD §6.1)
+    @property cpu_util -> float       # cpu_used / cpu_total
+    @property memory_util -> float    # memory_used / memory_total
+    @property cpu_remaining -> float
+    @property memory_remaining -> float
+    @property pods_remaining -> int
+    
+    # Placement filter
+    def fits(vm: VM) -> bool          # True if all 3 dimensions fit
+    
+    # Factory methods (enforce metadata invariants)
+    @classmethod new_inventory(...)   # cost_weight=0.0, is_inventory=True
+    @classmethod new_catalog(...)     # cost_weight>0,   is_inventory=False
 ```
+
+#### Config Models (Pydantic, `frozen=True`)
+```python
+# config.yaml → PlanConfig
+#   ├── ClusterLimits          (max_pods_per_node)
+#   ├── OvercommitConfig       (cpu_ratio, memory_ratio)
+#   ├── VirtOverheads          (ht_efficiency_factor, ocp_virt_core,
+#   │                           ocp_virt_memory_mb, eviction_hard_mb)
+#   ├── SafetyMargins
+#   │   ├── UtilizationTargets (cpu, memory)
+#   │   └── ha_failures_to_tolerate
+#   └── AlgorithmWeights       (α, β, γ, δ — must sum to 1.0)
+
+# Hardware topology (shared by inventory & catalog)
+class CpuTopology(BaseModel):
+    sockets: int
+    cores_per_socket: int
+    threads_per_core: int = 1
+    @computed_field physical_cores -> int   # sockets × cores_per_socket
+    @computed_field logical_cpus -> int     # physical_cores × threads_per_core
+
+# inventory.yaml → InventoryConfig
+#   └── profiles: list[InventoryProfile]   (may be empty)
+#       └── InventoryProfile: profile_name, cpu_topology, ram_gb, quantity
+
+# catalog.yaml → CatalogConfig
+#   └── profiles: list[CatalogProfile]     (min_length=1)
+#       └── CatalogProfile: profile_name, cpu_topology, ram_gb, cost_weight
+```
+
+#### ClusterState
 The `unplace` method is critical for enabling $O(1)$ rollback during Lookahead heuristic simulation.
 
 ```

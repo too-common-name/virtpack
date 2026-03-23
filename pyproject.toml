@@ -12,6 +12,12 @@ dependencies = [
     "pyyaml>=6.0,<7",
 ]
 
+[project.scripts]
+virtpack = "cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["cli*", "core*", "models*", "algorithms*", "loaders*", "report*"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0,<10",

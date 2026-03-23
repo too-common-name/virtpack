@@ -92,7 +92,9 @@ _VINFO_REQUIRED = {"vm", "cpus", "memory", "powerstate"}
 _VINFO_FILTER_COLS = {"srm placeholder", "template"}
 
 # Required vHost columns (lowercase)
-_VHOST_REQUIRED = {"host", "# cpu", "cores per cpu", "ht active", "# memory"}
+# Note: "ht active" is intentionally optional — not all RVTools exports
+# include it.  When absent, we default to ht_active=False (conservative).
+_VHOST_REQUIRED = {"host", "# cpu", "cores per cpu", "# memory"}
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -220,14 +222,14 @@ def parse_vhost(path: Path) -> list[RawHost]:
 
     RVTools vHost column mapping:
 
-    ============== ========================= ==========================
-    RawHost field  vHost column              Example
-    ============== ========================= ==========================
-    sockets        ``# CPU``                 2
-    cores_per_socket ``Cores per CPU``       8
-    ht_active      ``HT Active``             True
-    memory_mb      ``# Memory``              524253 (MB)
-    ============== ========================= ==========================
+    ============== ========================= ========= =================
+    RawHost field  vHost column              Example   Required?
+    ============== ========================= ========= =================
+    sockets        ``# CPU``                 2         Yes
+    cores_per_socket ``Cores per CPU``       8         Yes
+    ht_active      ``HT Active``             True      No (default False)
+    memory_mb      ``# Memory``              524253    Yes
+    ============== ========================= ========= =================
 
     Parameters
     ----------
@@ -260,8 +262,12 @@ def parse_vhost(path: Path) -> list[RawHost]:
         cores_per_socket = int(row["cores per cpu"])
         memory_mb = int(row["# memory"])
 
-        ht_raw = str(row["ht active"]).strip().lower()
-        ht_active = ht_raw in {"true", "yes", "1"}
+        # HT Active is optional — default to False (conservative)
+        if "ht active" in df.columns and not pd.isna(row["ht active"]):
+            ht_raw = str(row["ht active"]).strip().lower()
+            ht_active = ht_raw in {"true", "yes", "1"}
+        else:
+            ht_active = False
 
         hosts.append(
             RawHost(

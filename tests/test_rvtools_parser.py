@@ -397,6 +397,22 @@ class TestParseVhostEdgeCases:
         result = parse_vhost(path)
         assert len(result) == 1
 
+    def test_missing_ht_active_column_defaults_false(self, tmp_path: Path) -> None:
+        """When 'HT Active' column is absent, ht_active defaults to False."""
+        path = _write_vhost(
+            tmp_path,
+            [
+                ["host1", 2, 8, 131072],
+                ["host2", 2, 16, 262144],
+            ],
+            columns=("Host", "# CPU", "Cores per CPU", "# Memory"),
+        )
+        result = parse_vhost(path)
+        assert len(result) == 2
+        assert all(h.ht_active is False for h in result)
+        assert result[0].sockets == 2
+        assert result[0].cores_per_socket == 8
+
     def test_empty_sheet(self, tmp_path: Path) -> None:
         path = _write_vhost(tmp_path, [])
         result = parse_vhost(path)

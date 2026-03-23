@@ -16,3 +16,5 @@ cli/__pycache__/
 loaders/__pycache__/
 
 report/__pycache__/
+
+virtpack.egg-info/

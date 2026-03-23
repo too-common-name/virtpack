@@ -161,9 +161,7 @@ class Node(BaseModel):
             ``"{profile}-{index:02d}"`` → ``"r760-new-01"``
         """
         if cost_weight <= 0:
-            raise ValueError(
-                f"Catalog nodes must have cost_weight > 0, got {cost_weight}"
-            )
+            raise ValueError(f"Catalog nodes must have cost_weight > 0, got {cost_weight}")
         return cls(
             id=f"{profile}-{index:02d}",
             profile=profile,

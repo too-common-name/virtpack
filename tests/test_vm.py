@@ -5,7 +5,6 @@ from pydantic import ValidationError
 
 from models.vm import VM
 
-
 # ── Construction ────────────────────────────────────────────────────────
 
 
@@ -62,7 +61,7 @@ class TestVMStrictTyping:
 
     def test_allows_int_for_float_fields(self) -> None:
         """Pydantic V2 strict mode permits int → float (int is a subtype)."""
-        vm = VM(name="ok", cpu=4, memory_mb=1024)  # type: ignore[arg-type]
+        vm = VM(name="ok", cpu=4, memory_mb=1024)
         assert vm.cpu == 4.0
         assert isinstance(vm.cpu, (int, float))
 

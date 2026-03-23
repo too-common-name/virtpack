@@ -18,7 +18,6 @@ from models.config import (
     VirtOverheads,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # PlanConfig  –  sensible defaults
 # ═══════════════════════════════════════════════════════════════════════
@@ -69,7 +68,7 @@ class TestAlgorithmWeights:
         assert w.alpha_balance == 0.25
 
     def test_rejects_weights_over_one(self) -> None:
-        with pytest.raises(ValidationError, match="sum to 1.0"):
+        with pytest.raises(ValidationError, match=r"sum to 1\.0"):
             AlgorithmWeights(
                 alpha_balance=0.5,
                 beta_spread=0.5,
@@ -78,7 +77,7 @@ class TestAlgorithmWeights:
             )
 
     def test_rejects_weights_under_one(self) -> None:
-        with pytest.raises(ValidationError, match="sum to 1.0"):
+        with pytest.raises(ValidationError, match=r"sum to 1\.0"):
             AlgorithmWeights(
                 alpha_balance=0.1,
                 beta_spread=0.1,
@@ -202,9 +201,7 @@ class TestCatalogConfig:
 
     def test_rejects_zero_cost_weight(self) -> None:
         with pytest.raises(ValidationError):
-            CatalogProfile(
-                profile_name="bad", cpu_topology=_TOPO, ram_gb=512, cost_weight=0.0
-            )
+            CatalogProfile(profile_name="bad", cpu_topology=_TOPO, ram_gb=512, cost_weight=0.0)
 
     def test_frozen(self) -> None:
         cat = CatalogConfig(
@@ -255,7 +252,6 @@ class TestInventoryConfig:
 
 
 class TestVirtOverheads:
-
     def test_defaults(self) -> None:
         v = VirtOverheads()
         assert v.ht_efficiency_factor == 1.5
@@ -288,7 +284,6 @@ class TestVirtOverheads:
 
 
 class TestClusterLimits:
-
     def test_rejects_zero_pods(self) -> None:
         with pytest.raises(ValidationError):
             ClusterLimits(max_pods_per_node=0)
@@ -299,7 +294,6 @@ class TestClusterLimits:
 
 
 class TestSafetyMargins:
-
     def test_defaults(self) -> None:
         s = SafetyMargins()
         assert s.ha_failures_to_tolerate == 1

@@ -16,7 +16,6 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-
 # ═══════════════════════════════════════════════════════════════════════
 # 1. config.yaml  (HLD §3.2)
 # ═══════════════════════════════════════════════════════════════════════

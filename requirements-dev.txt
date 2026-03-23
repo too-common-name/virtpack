@@ -1,0 +1,7 @@
+# Dev/CI dependencies — install with: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=8.0,<10
+pytest-cov>=6.0,<7
+ruff>=0.11,<1
+mypy>=1.15,<2
+pandas-stubs>=2.2,<3

@@ -6,8 +6,8 @@ from pydantic import ValidationError
 from models.node import Node
 from models.vm import VM
 
-
 # ── Helpers ────────────────────────────────────────────────────────────
+
 
 def _make_node(
     cpu_total: float = 64.0,
@@ -75,9 +75,12 @@ class TestNodeFits:
     def test_fails_only_cpu_while_others_fit(self) -> None:
         """A single dimension failure is enough to reject."""
         node = _make_node(
-            cpu_total=2.0, cpu_used=1.5,
-            memory_total=524288.0, memory_used=0.0,
-            pods_total=500, pods_used=0,
+            cpu_total=2.0,
+            cpu_used=1.5,
+            memory_total=524288.0,
+            memory_used=0.0,
+            pods_total=500,
+            pods_used=0,
         )
         vm = _make_vm(cpu=1.0, memory_mb=1024.0)  # CPU: 1.5+1.0 > 2.0
         assert node.fits(vm) is False
@@ -96,17 +99,22 @@ class TestNodeDerivedProperties:
 
     def test_utilization_half_loaded(self) -> None:
         node = _make_node(
-            cpu_total=64.0, cpu_used=32.0,
-            memory_total=524288.0, memory_used=262144.0,
+            cpu_total=64.0,
+            cpu_used=32.0,
+            memory_total=524288.0,
+            memory_used=262144.0,
         )
         assert node.cpu_util == pytest.approx(0.5)
         assert node.memory_util == pytest.approx(0.5)
 
     def test_remaining_capacity(self) -> None:
         node = _make_node(
-            cpu_total=64.0, cpu_used=10.0,
-            memory_total=524288.0, memory_used=100000.0,
-            pods_total=500, pods_used=42,
+            cpu_total=64.0,
+            cpu_used=10.0,
+            memory_total=524288.0,
+            memory_used=100000.0,
+            pods_total=500,
+            pods_used=42,
         )
         assert node.cpu_remaining == pytest.approx(54.0)
         assert node.memory_remaining == pytest.approx(424288.0)
@@ -114,9 +122,12 @@ class TestNodeDerivedProperties:
 
     def test_utilization_fully_loaded(self) -> None:
         node = _make_node(
-            cpu_total=64.0, cpu_used=64.0,
-            memory_total=524288.0, memory_used=524288.0,
-            pods_total=500, pods_used=500,
+            cpu_total=64.0,
+            cpu_used=64.0,
+            memory_total=524288.0,
+            memory_used=524288.0,
+            pods_total=500,
+            pods_used=500,
         )
         assert node.cpu_util == pytest.approx(1.0)
         assert node.memory_util == pytest.approx(1.0)
@@ -131,8 +142,11 @@ class TestNodeFactories:
 
     def test_new_inventory_sets_cost_zero(self) -> None:
         node = Node.new_inventory(
-            profile="r740", index=1,
-            cpu_total=48.0, memory_total=400000.0, pods_total=500,
+            profile="r740",
+            index=1,
+            cpu_total=48.0,
+            memory_total=400000.0,
+            pods_total=500,
         )
         assert node.cost_weight == 0.0
         assert node.is_inventory is True
@@ -141,16 +155,22 @@ class TestNodeFactories:
     def test_new_inventory_auto_id(self) -> None:
         """Auto-generates '{profile}-{index:02d}'."""
         node = Node.new_inventory(
-            profile="r740-existing", index=3,
-            cpu_total=48.0, memory_total=400000.0, pods_total=500,
+            profile="r740-existing",
+            index=3,
+            cpu_total=48.0,
+            memory_total=400000.0,
+            pods_total=500,
         )
         assert node.id == "r740-existing-03"
 
     def test_new_inventory_id_override_for_vhost(self) -> None:
         """RVTools vHost auto-discovery provides actual ESXi hostname."""
         node = Node.new_inventory(
-            profile="vhost-auto", index=1,
-            cpu_total=48.0, memory_total=400000.0, pods_total=500,
+            profile="vhost-auto",
+            index=1,
+            cpu_total=48.0,
+            memory_total=400000.0,
+            pods_total=500,
             id_override="esxi-prod-07.dc1.local",
         )
         assert node.id == "esxi-prod-07.dc1.local"
@@ -158,8 +178,11 @@ class TestNodeFactories:
 
     def test_new_catalog_sets_is_inventory_false(self) -> None:
         node = Node.new_catalog(
-            profile="r760", index=1,
-            cpu_total=60.0, memory_total=800000.0, pods_total=500,
+            profile="r760",
+            index=1,
+            cpu_total=60.0,
+            memory_total=800000.0,
+            pods_total=500,
             cost_weight=1.0,
         )
         assert node.is_inventory is False
@@ -168,8 +191,11 @@ class TestNodeFactories:
     def test_new_catalog_auto_id(self) -> None:
         """Auto-generates '{profile}-{index:02d}'."""
         node = Node.new_catalog(
-            profile="r760-new", index=5,
-            cpu_total=60.0, memory_total=800000.0, pods_total=500,
+            profile="r760-new",
+            index=5,
+            cpu_total=60.0,
+            memory_total=800000.0,
+            pods_total=500,
             cost_weight=1.0,
         )
         assert node.id == "r760-new-05"
@@ -177,16 +203,22 @@ class TestNodeFactories:
     def test_new_catalog_rejects_zero_cost(self) -> None:
         with pytest.raises(ValueError, match="cost_weight > 0"):
             Node.new_catalog(
-                profile="bad", index=1,
-                cpu_total=1.0, memory_total=1.0, pods_total=1,
+                profile="bad",
+                index=1,
+                cpu_total=1.0,
+                memory_total=1.0,
+                pods_total=1,
                 cost_weight=0.0,
             )
 
     def test_new_catalog_rejects_negative_cost(self) -> None:
         with pytest.raises(ValueError, match="cost_weight > 0"):
             Node.new_catalog(
-                profile="bad", index=1,
-                cpu_total=1.0, memory_total=1.0, pods_total=1,
+                profile="bad",
+                index=1,
+                cpu_total=1.0,
+                memory_total=1.0,
+                pods_total=1,
                 cost_weight=-1.0,
             )
 
@@ -248,20 +280,35 @@ class TestNodeValidation:
     def test_rejects_empty_id(self) -> None:
         with pytest.raises(ValidationError):
             Node(
-                id="", profile="p", cpu_total=1.0, memory_total=1.0,
-                pods_total=1, cost_weight=0.0, is_inventory=True,
+                id="",
+                profile="p",
+                cpu_total=1.0,
+                memory_total=1.0,
+                pods_total=1,
+                cost_weight=0.0,
+                is_inventory=True,
             )
 
     def test_rejects_zero_cpu_total(self) -> None:
         with pytest.raises(ValidationError):
             Node(
-                id="n", profile="p", cpu_total=0.0, memory_total=1.0,
-                pods_total=1, cost_weight=0.0, is_inventory=True,
+                id="n",
+                profile="p",
+                cpu_total=0.0,
+                memory_total=1.0,
+                pods_total=1,
+                cost_weight=0.0,
+                is_inventory=True,
             )
 
     def test_rejects_negative_memory_total(self) -> None:
         with pytest.raises(ValidationError):
             Node(
-                id="n", profile="p", cpu_total=1.0, memory_total=-1.0,
-                pods_total=1, cost_weight=0.0, is_inventory=True,
+                id="n",
+                profile="p",
+                cpu_total=1.0,
+                memory_total=-1.0,
+                pods_total=1,
+                cost_weight=0.0,
+                is_inventory=True,
             )

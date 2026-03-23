@@ -12,3 +12,5 @@ core/__pycache__/
 algorithms/__pycache__/
 
 cli/__pycache__/
+
+loaders/__pycache__/

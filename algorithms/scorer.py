@@ -1,8 +1,15 @@
-"""K8s-like node scoring function (HLD §6.1).
+"""Weighted node scoring function for capacity planning (HLD §6.1).
 
 All component scores are ∈ [0, 1].  The final weighted score is:
 
-    score(node) = α·balance + β·spread + γ·pod_headroom − δ·frag_penalty
+    score(node) = α·balance + β·spread + γ·pod_headroom − δ·stranded_penalty
+
+Each term provides a unique, non-redundant signal:
+
+* **balance** — CPU/memory utilization proportionality
+* **spread** — LeastAllocated (favors empty nodes)
+* **pod_headroom** — pod slot availability
+* **stranded_penalty** — dimensional imbalance of *remaining* capacity
 
 Pure functions — no side effects, no hidden state.
 """
@@ -51,20 +58,36 @@ def pod_headroom_score(node: Node) -> float:
 
 
 def fragmentation_penalty(node: Node) -> float:
-    """Memory fragmentation — ``(memory_remaining / memory_total)²``.
+    """Stranded capacity penalty — ``(cpu_remaining% − memory_remaining%)²``.
 
-    Penalty increases when nodes contain small remaining memory
-    segments that are unlikely to host future VMs.
+    Penalizes nodes where remaining CPU and memory are disproportionate.
+    When one dimension has ample remaining capacity but the other is
+    nearly exhausted, the excess dimension is **stranded** — it cannot
+    be consumed by future VMs.
+
+    This is the genuine fragmentation signal for offline capacity
+    planning: unlike online scheduling where pods arrive randomly,
+    all items are known upfront, so the penalty focuses on
+    *dimensional imbalance* of remaining capacity.
+
+    ======== ========= ========= ========= =========================
+    Scenario CPU rem%  Mem rem%  Penalty   Interpretation
+    ======== ========= ========= ========= =========================
+    Empty    100%      100%      0.00      No stranding
+    Balanced 50%       50%       0.00      No stranding
+    CPU-bound 10%      70%       0.36      Memory stranded
+    Mem-bound 60%       5%       0.30      CPU stranded
+    Full      0%        0%       0.00      Nothing remaining
+    ======== ========= ========= ========= =========================
 
     Note: this is a *penalty* (subtracted in the weighted score).
-    A fully empty node has penalty 1.0 (no fragment yet — but the
-    cost of leaving it nearly empty is high).  A full node has
-    penalty ~0 (no wasted fragment).
     """
-    if node.memory_total == 0.0:
+    if node.cpu_total == 0.0 or node.memory_total == 0.0:
         return 0.0
-    ratio = node.memory_remaining / node.memory_total
-    return ratio * ratio
+    cpu_rem = node.cpu_remaining / node.cpu_total
+    mem_rem = node.memory_remaining / node.memory_total
+    diff = cpu_rem - mem_rem
+    return diff * diff
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -73,11 +96,11 @@ def fragmentation_penalty(node: Node) -> float:
 
 
 def score_node(node: Node, weights: AlgorithmWeights) -> float:
-    """Compute the weighted K8s-like score for a node.
+    """Compute the weighted score for a node.
 
     ::
 
-        score = α·balance + β·spread + γ·pod_headroom − δ·frag_penalty
+        score = α·balance + β·spread + γ·pod_headroom − δ·stranded_penalty
 
     Higher is better.  Range depends on weights but typically ∈ [-1, 1].
     """

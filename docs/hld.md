@@ -12,11 +12,72 @@ Traditional sizing approaches rely on aggregated formulas:
 This ignores resource fragmentation and workload distribution, leading to clusters that appear valid on paper but fail during scheduling.
 
 `virtpack` solves this problem by:
-- parsing real workloads
-- normalizing resource usage
-- applying safety margins
-- simulating placement using a bin-packing heuristic
+- parsing real workloads from RVTools exports
+- normalizing resource usage with Red Hat overhead math
+- applying configurable safety margins
+- simulating placement using a **multidimensional bin-packing heuristic**
 - generating auditable placement reports
+
+### 1.1 Target Use Cases
+
+The tool is designed to address four distinct scenarios, controlled by the `--strategy` flag (default: `spread`):
+
+#### Scenario A1 — Pure Brownfield / Spread (default)
+> *"I have 15 VMware hosts. Can I reuse them ALL for OpenShift Virtualization?"*
+
+- **Input:** RVTools export + no catalog · `--strategy spread`
+- **Nodes:** Existing hardware only (inventory, cost = 0)
+- **Goal:** Prove all VMs fit on the existing infrastructure; show balanced utilization
+- **Key concern:** Empty nodes = wasted OCP subscriptions; the engine must use ALL available nodes
+- **Strategy:** All inventory nodes are added to `ClusterState` upfront. The scorer distributes VMs evenly across the full fleet using the `spread_score` signal.
+
+#### Scenario A2 — Pure Brownfield / Consolidate
+> *"I have 15 VMware hosts, but I want to minimize OCP subscriptions. Which nodes can I shut down?"*
+
+- **Input:** RVTools export + no catalog · `--strategy consolidate`
+- **Nodes:** Existing hardware only (inventory, cost = 0), pulled lazily from a pool
+- **Goal:** Pack VMs onto the fewest inventory nodes; identify nodes that can be powered off
+- **Key concern:** OCP subscriptions are per-node — unused nodes should be shut down
+- **Strategy:** Inventory nodes are held in a **pool** (not added to `ClusterState` upfront). When no active node can fit the next VM, the engine pulls the largest available node from the pool. This mirrors the Expander's lazy expansion pattern but at zero cost. The summary reports "Nodes Available for Shutdown" and subscription savings.
+
+#### Scenario B — Pure Greenfield
+> *"I'm buying new hardware. What's the minimum set?"*
+
+- **Input:** RVTools export + hardware catalog
+- **Nodes:** New purchases only (catalog, cost > 0)
+- **Goal:** Minimize the number (and cost) of new nodes purchased
+- **Key concern:** Each additional node is an additional subscription and hardware cost
+- **Strategy:** The Expander creates nodes on-demand; a new node is only added when no existing node can fit the next VM. Consolidation is **structural**, built into the expansion logic — the scorer does not need a MostAllocated signal.
+
+#### Scenario C — Hybrid
+> *"I have some old servers, but I may need to buy more."*
+
+- **Input:** RVTools export + inventory + catalog
+- **Nodes:** Existing hardware filled first, then catalog expansion on demand
+- **Goal:** Maximize utilization of existing hardware; minimize new purchases
+- **Strategy:** Spread across inventory (free), expand with catalog only when inventory is exhausted
+
+### 1.2 Offline Capacity Planning vs Live Scheduling
+
+`virtpack` is an **offline sizing tool**, not a runtime scheduler. This distinction drives fundamental design decisions:
+
+| | K8s Scheduler | virtpack |
+|---|---|---|
+| **Input** | One pod at a time (online) | All VMs at once (offline) |
+| **Goal** | Place this pod NOW | Prove a valid placement EXISTS |
+| **Fragmentation** | Real concern (pods come and go) | Static allocation (no churn) |
+| **Node scaling** | Dynamic (autoscaler) | Fixed set or known catalog |
+| **Output** | Runtime binding | Mathematical audit trail (§8.5) |
+
+The placement map CSV is generated solely as a **proof of feasibility**. The real Kubernetes scheduler will drift from this placement on Day 2 (see §9).
+
+### 1.3 Theoretical Foundation
+
+The placement problem is an instance of the **Multidimensional Vector Bin Packing Problem (VBPP)**:
+
+> Each VM is a *d*-dimensional item vector `(cpu, memory, pods)` and each node is a bin with capacity vector `(CPU, MEM, PODS)`. The objective is to assign all items to the minimum number of bins such that no capacity constraint is violated.
+
+This problem is **NP-hard** (Garey & Johnson, 1979). `virtpack` uses a **First-Fit-Decreasing (FFD)** heuristic — sorting items by their largest dimension and greedily assigning each to the best-scoring bin — which provides well-studied approximation guarantees for VBPP (Speitkamp & Bichler, 2010).
 
 ------------------------------------------------------------------------
 
@@ -41,13 +102,13 @@ The tool operates on a standard ETL (Extract, Transform, Load) and simulation pi
    - Apply utilization targets to derive effective schedulable capacity
 
 4. Sort
-   - Sort VMs by memory (descending)
+   - Sort VMs by memory (descending) — FFD heuristic
 
 5. Placement Loop
    For each VM:
      a. Filter candidate nodes
      b. Expand (create new node if needed)
-     c. Score nodes (K8s-like scoring + lookahead k=2)
+     c. Score nodes (weighted scoring + lookahead k=2)
      d. Bind VM to best node
 
 6. HA Injection
@@ -93,9 +154,9 @@ Contains cluster-wide limits, overcommit ratios, Red Hat baseline overheads, and
       
     algorithm_weights:
       alpha_balance: 0.3        # Favors nodes with proportional CPU/RAM usage
-      beta_spread: 0.3          # Favors the emptiest nodes
+      beta_spread: 0.3          # Favors the emptiest nodes (LeastAllocated)
       gamma_pod_headroom: 0.1   # Favors nodes with available pod IP space
-      delta_frag_penalty: 0.3   # Punishes unusable memory gaps
+      delta_frag_penalty: 0.3   # Penalizes dimensional imbalance in remaining capacity
 
 ### 3.3 Inventory (inventory.yaml)
 Represents **existing brownfield hardware**. 
@@ -123,9 +184,23 @@ For "Lift and Shift" migrations where the customer is reusing their existing hyp
         cost_weight: 1.0
 
 ### 3.5 Tuning the Algorithm Weights
-The `algorithm_weights` are hyperparameters representing the operational philosophy of the cluster:
-* **Cost-Optimized (Aggressive Bin-packing):** Increase `delta_frag_penalty` and decrease `beta_spread`. The algorithm will tightly pack nodes and ignore spreading rules to save money.
-* **Resilience-Optimized (Default K8s):** Keep `alpha`, `beta`, and `delta` relatively equal. This mimics the default `kube-scheduler`, providing an accurate Day-2 representation.
+
+The `algorithm_weights` are hyperparameters representing the operational philosophy of the cluster. Each term in the scoring function (§6.1) provides a unique, non-redundant signal:
+
+| Weight | Term | Signal |
+|--------|------|--------|
+| α `alpha_balance` | Balance | CPU/memory utilization should be proportional |
+| β `beta_spread` | Spread (LeastAllocated) | Distribute VMs across available nodes |
+| γ `gamma_pod_headroom` | Pod headroom | Don't exhaust pod/IP slots |
+| δ `delta_frag_penalty` | Stranded capacity | Don't strand remaining capacity in one dimension |
+
+**Tuning Profiles:**
+
+* **Spread-Optimized (Brownfield Default):** High β, moderate δ. Spreads VMs across all paid-for nodes while avoiding stranded capacity. This is the recommended default for brownfield migrations.
+* **Balance-Optimized:** High α, high δ. Keeps nodes tightly balanced across CPU/memory and minimizes wasted capacity from dimensional imbalance.
+* **Pod-Sensitive:** Increase γ when running many small VMs that risk hitting the max-pods-per-node limit.
+
+> **Note on consolidation:** For greenfield scenarios (B) and brownfield consolidation (A2), consolidation is handled **structurally** — the Expander and the inventory pool add new nodes only when no active node can fit the next VM. The scorer does not need a MostAllocated signal because node introduction is inherently lazy.
 
 ------------------------------------------------------------------------
 
@@ -177,7 +252,7 @@ Overheads originate from:
  
 ### 4.1 Formal Resource Model
 
-The placement problem can be modeled as a multidimensional bin packing problem.
+The placement problem can be modeled as a multidimensional vector bin packing problem (VBPP).
 
 Let:
 ```
@@ -191,8 +266,7 @@ Constraints:
     for all VMs assigned to Node_j.
 ```
 
-The objective is to minimize the number of nodes used while minimizing resource fragmentation. 
-This problem is NP-hard, therefore `virtpack` relies on heuristic algorithms rather than exact optimization.
+The objective is to place all VMs using the minimum number of nodes while ensuring balanced distribution. This problem is NP-hard (it generalizes the classical bin packing problem), therefore `virtpack` relies on FFD-style heuristics rather than exact optimization.
 
 ------------------------------------------------------------------------
 
@@ -208,35 +282,44 @@ If RAM target is 80%, a 400GB node will reject VMs once 320GB is consumed.
 
 ## 6. The Placement Engine
 
-The placement engine approximates Kubernetes scheduling behavior.
-Real Kubernetes scheduling uses two phases:
-1. **Filtering:** Nodes failing hard constraints are removed.
-2. **Scoring:** Nodes are ranked based on `NodeResourcesBalancedAllocation`, `LeastAllocated`, and `PodTopologySpread`.
+The placement engine simulates VM-to-node assignment using a weighted scoring heuristic inspired by Kubernetes scheduling, adapted for offline capacity planning.
 
-`virtpack` approximates these behaviors through a weighted scoring function combined with Lookahead.
+#### 6.1 The Scoring Model
 
-#### 6.1 The Scoring Model (K8s Simulation)
-We replicate a simplified score phase using the weights from `config.yaml`:
+Each candidate node receives a weighted score. Higher is better.
 
     score(node) = 
         (α * balance_score) 
       + (β * spread_score) 
       + (γ * pod_headroom)
-      - (δ * fragmentation_penalty)
+      - (δ * stranded_penalty)
 
-Where the metrics are mathematically calculated and explained as follows:
-* **CPU/Memory Balance:** `1 - abs(cpu_util - mem_util)`
-  *Encourages balanced nodes to prevent exhausting one resource while the other sits idle.*
-* **Spread Score:** `((1 - cpu_util) + (1 - mem_util)) / 2`
-  *Favors nodes with the most free resources, mimicking K8s `LeastAllocated`.*
-* **Pod Headroom:** `1 - (pods_used / max_pods)`
+Each component ∈ [0, 1]:
+
+* **CPU/Memory Balance (α):** `1 - abs(cpu_util - mem_util)`
+  *Encourages balanced nodes to prevent exhausting one resource while the other sits idle. Mimics K8s `NodeResourcesBalancedAllocation`.*
+
+* **Spread Score (β):** `((1 - cpu_util) + (1 - mem_util)) / 2`
+  *Favors nodes with the most free resources. Mimics K8s `LeastAllocated`. This is the primary signal for distributing VMs across available hardware.*
+
+* **Pod Headroom (γ):** `1 - (pods_used / max_pods)`
   *Discourages pod exhaustion to preserve IP space and scheduling limits.*
-* **Memory Fragmentation:** `(memory_remaining / node_memory)^2`
-  *Fragmentation penalty increases when nodes contain small remaining memory segments that are unlikely to host future VMs.*
+
+* **Stranded Capacity Penalty (δ):** `(cpu_remaining% - memory_remaining%)²`
+  *Penalizes nodes where remaining CPU and memory are disproportionate. When one dimension has ample remaining capacity but the other is nearly exhausted, the excess dimension is "stranded" — it cannot be consumed by future VMs. This is the genuine fragmentation signal for capacity planning: unlike online scheduling where pods arrive and leave randomly, in offline VBPP all items are known upfront, so the penalty focuses on dimensional imbalance rather than memory gaps.*
+
+  | Scenario | CPU rem% | Mem rem% | Penalty | Interpretation |
+  |----------|----------|----------|---------|----------------|
+  | Empty node | 100% | 100% | 0.00 | No stranding |
+  | Balanced 50% | 50% | 50% | 0.00 | No stranding |
+  | CPU-bound | 10% | 70% | 0.36 | 70% memory stranded |
+  | Memory-bound | 60% | 5% | 0.30 | 60% CPU stranded |
+  | Fully used | 0% | 0% | 0.00 | Nothing remaining |
+
 
 #### 6.2 The Placement Algorithm (With Lookahead k=2)
 
-    Sort VMs by memory desc
+    Sort VMs by memory desc          // FFD heuristic
 
     For index, vm in enumerate(vms):
         // 0. HARD CONSTRAINT (Monster VM Check)
@@ -248,25 +331,32 @@ Where the metrics are mathematically calculated and explained as follows:
         
         // 2. EXPAND: If candidate_nodes is empty -> create_catalog_node()
             
-        // 3. SCORE: With Lookahead
+        // 3. SCORE: Projected State with Lookahead
+        //    Scoring evaluates the **projected** state (after tentatively
+        //    placing the current VM), not the node's current state.
+        //    This mirrors K8s scoring (NodeResourcesBalancedAllocation,
+        //    LeastAllocated) and enables stranded nodes to "attract" VMs
+        //    whose resource profile reduces dimensional imbalance.
         best_node = None
         best_total_score = -infinity  // Higher score is better
         
-        for node in candidate_nodes:        
-            base_score = calculate_k8s_score(node)
+        for node in candidate_nodes:
+            simulate_place(node, vm)
+            base_score = calculate_score(node)  // scored AFTER placing vm
             
-            // Lookahead check for next VM
+            // Lookahead: score with both vm AND next_vm placed
             lookahead_score = 0
             if (index + 1) < len(vms):
                 next_vm = vms[index + 1]
-                simulate_place(node, vm)
                 
                 if node_fits(node, next_vm):
-                    lookahead_score = calculate_k8s_score(node)
+                    simulate_place(node, next_vm)
+                    lookahead_score = calculate_score(node)
+                    undo_simulate_place(node, next_vm)
                 else:
                     lookahead_score = massive_negative_penalty
-                
-                undo_simulate_place(node, vm)
+            
+            undo_simulate_place(node, vm)
             
             total_score = base_score + (0.5 * lookahead_score)
             
@@ -275,6 +365,8 @@ Where the metrics are mathematically calculated and explained as follows:
                 best_node = node
                 
         // 4. BIND: place(vm, best_node)
+
+> **Design rationale — projected scoring:** Pre-placement scoring evaluates a node's *current* state, so a stranded node always receives the same penalty regardless of which VM is being considered. Projected scoring evaluates the node *after* the VM, so a CPU-heavy VM makes a CPU-stranded node more attractive (it reduces the dimensional gap), while a memory-heavy VM makes it less attractive (it widens the gap). This enables automatic rebalancing of stranded nodes without requiring manual weight tuning.
 
 #### 6.3 Unplaced VM Handling
 If a VM cannot fit on any inventory or catalog profile, the VM is added to the **Unplaced list**. The planner continues processing the remaining workload while emitting a clear warning to the user. 
@@ -327,13 +419,18 @@ The terminal output prioritizes human readability and immediate operational insi
     =========================================
 
 #### 8.2 Cluster Fragmentation Index (CFI)
-    CFI = average(fragmentation_penalty(nodes))
+
+The CFI quantifies how much remaining cluster capacity is dimensionally stranded — i.e., remaining CPU and memory are disproportionate, making the excess in one dimension unusable.
+
+    CFI = average(stranded_penalty(nodes))
+
+where `stranded_penalty(node) = (cpu_remaining% − memory_remaining%)²`.
 
 *Example:*
-* Cluster A: CFI = 0.12
-* Cluster B: CFI = 0.42
+* Cluster A: CFI = 0.02 — remaining capacity is well-balanced across dimensions
+* Cluster B: CFI = 0.25 — significant stranded capacity; consider different node profiles
 
-Lower values = better packing.
+Lower CFI = remaining capacity is more evenly distributed across dimensions = better.
 
 #### 8.3 Node Pressure Index
 Node pressure measures the highest resource utilization across nodes.
@@ -369,7 +466,16 @@ To address this operational reality, `virtpack` sizing pairs with standard Day-2
 
 ------------------------------------------------------------------------
 
-## 10. Future Improvements
+## 10. References
+
+1. Speitkamp, B. & Bichler, M. (2010). *"A Mathematical Programming Approach for Server Consolidation Problems in Virtualized Data Centers."* IEEE Transactions on Services Computing, 3(4), 266–278. [PDF](https://pub.dss.in.tum.de/bichler-research/2006_bichler_capacity_planning.pdf)
+2. Garey, M. R. & Johnson, D. S. (1979). *Computers and Intractability: A Guide to the Theory of NP-Completeness.* W. H. Freeman.
+3. Red Hat (2024). *OpenShift Virtualization Cluster Sizing Guide.* [Link](https://access.redhat.com/sites/default/files/attachments/openshift_virtualization_cluster_sizing_guide.pdf)
+4. OpenShift Machine Config Operator — kubelet-auto-sizing.yaml. [Source](https://github.com/openshift/machine-config-operator/blob/release-4.17/templates/common/_base/files/kubelet-auto-sizing.yaml)
+
+------------------------------------------------------------------------
+
+## 11. Future Improvements
 
 Future improvements may extend scheduling realism. Possible enhancements include:
 

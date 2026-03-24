@@ -18,3 +18,5 @@ loaders/__pycache__/
 report/__pycache__/
 
 virtpack.egg-info/
+
+out/

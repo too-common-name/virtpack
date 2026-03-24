@@ -33,6 +33,7 @@ class PlacementResult:
 
     state: ClusterState
     unplaced: list[VM] = field(default_factory=list)
+    unused_inventory: list[Node] = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -48,12 +49,33 @@ _LOOKAHEAD_PENALTY: float = -10.0
 _LOOKAHEAD_WEIGHT: float = 0.5
 
 
+def _pull_from_pool(vm: VM, pool: list[Node]) -> Node | None:
+    """Pick the best inventory node from *pool* that can fit *vm*.
+
+    Selection heuristic: pick the node with the **most total capacity**
+    (memory first, then CPU).  This gives the largest available node to
+    the current VM, maximizing room for follow-on VMs to pack alongside
+    it — which is exactly what consolidation wants.
+
+    The chosen node is **removed** from *pool* and returned (or ``None``
+    if no node in the pool fits).
+    """
+    eligible = [n for n in pool if n.fits(vm)]
+    if not eligible:
+        return None
+    # Largest node first (most room for future co-located VMs)
+    best = max(eligible, key=lambda n: (n.memory_total, n.cpu_total))
+    pool.remove(best)
+    return best
+
+
 def run_placement(
     *,
     vms: list[VM],
     state: ClusterState,
     config: PlanConfig,
     catalog: CatalogConfig | None = None,
+    inventory_pool: list[Node] | None = None,
 ) -> PlacementResult:
     """Execute the full placement simulation.
 
@@ -63,7 +85,7 @@ def run_placement(
         For each VM:
             0. Monster VM check
             1. FILTER  — get candidate nodes
-            2. EXPAND  — create catalog node if no candidates
+            2. EXPAND  — pull inventory from pool OR create catalog node
             3. SCORE   — weighted score + Lookahead k=2
             4. BIND    — place VM on best node
 
@@ -72,43 +94,54 @@ def run_placement(
     vms : list[VM]
         Normalized VMs (post-overcommit). Will be sorted internally.
     state : ClusterState
-        Pre-populated with inventory nodes (and any prior catalog nodes).
+        Pre-populated with inventory nodes (spread mode) or empty
+        (consolidate mode).
     config : PlanConfig
         Global configuration (weights, limits, overheads, safety).
     catalog : CatalogConfig | None
         Available catalog profiles for expansion.  ``None`` means
         **inventory-only mode** — VMs that don't fit on existing
         nodes are added to the unplaced list without expansion.
+    inventory_pool : list[Node] | None
+        Reserved inventory nodes for **consolidate mode** (HLD §1.1).
+        When no active node fits a VM, the engine pulls a node from
+        this pool (free, cost=0) before attempting catalog expansion.
+        ``None`` or empty list means no pool (spread mode).
 
     Returns
     -------
     PlacementResult
-        Contains the final ``ClusterState`` and the list of unplaced VMs.
+        Contains the final ``ClusterState``, unplaced VMs, and any
+        unused inventory nodes remaining in the pool.
     """
     weights = config.algorithm_weights
     sorted_vms = sorted(vms, key=lambda v: v.memory_mb, reverse=True)
     unplaced: list[VM] = []
     catalog_counter = 0
+    pool: list[Node] = list(inventory_pool) if inventory_pool else []
 
     for idx, vm in enumerate(sorted_vms):
-        # ── 0. HARD CONSTRAINT (Monster VM check) ────────────────
-        # Already handled by expand returning None below.
-        # If no catalog profile can fit the VM, it's unplaced.
-
         # ── 1. FILTER ────────────────────────────────────────────
         candidates = state.get_candidate_nodes(vm)
 
         # ── 2. EXPAND ────────────────────────────────────────────
         if not candidates:
-            catalog_counter += 1
-            new_node = expand(vm, catalog, config, catalog_counter)
-            if new_node is None:
-                # Monster VM — no catalog profile large enough
-                unplaced.append(vm)
-                catalog_counter -= 1  # rollback counter
-                continue
-            state.add_node(new_node)
-            candidates = [new_node]
+            # 2a. Try inventory pool first (free nodes, consolidate mode)
+            pool_node = _pull_from_pool(vm, pool)
+            if pool_node is not None:
+                state.add_node(pool_node)
+                candidates = [pool_node]
+            else:
+                # 2b. Try catalog expansion
+                catalog_counter += 1
+                new_node = expand(vm, catalog, config, catalog_counter)
+                if new_node is None:
+                    # Monster VM — no catalog profile large enough
+                    unplaced.append(vm)
+                    catalog_counter -= 1  # rollback counter
+                    continue
+                state.add_node(new_node)
+                candidates = [new_node]
 
         # ── 3. SCORE + LOOKAHEAD ─────────────────────────────────
         next_vm = sorted_vms[idx + 1] if (idx + 1) < len(sorted_vms) else None
@@ -123,7 +156,11 @@ def run_placement(
         # ── 4. BIND ─────────────────────────────────────────────
         state.place(vm, best_node)
 
-    return PlacementResult(state=state, unplaced=unplaced)
+    return PlacementResult(
+        state=state,
+        unplaced=unplaced,
+        unused_inventory=pool,
+    )
 
 
 def _score_candidates(
@@ -134,32 +171,49 @@ def _score_candidates(
     state: ClusterState,
     weights: AlgorithmWeights,
 ) -> Node:
-    """Score candidates with optional Lookahead and return the best node.
+    """Score candidates on **projected** state and return the best node.
 
-    For each candidate:
-        base_score = score_node(node)
+    Unlike pre-placement scoring, projected scoring evaluates the node
+    *after* tentatively placing the current VM.  This mirrors the K8s
+    scheduler approach and allows stranded nodes to "attract" VMs that
+    reduce their dimensional imbalance.
+
+    For each candidate::
+
+        place(vm, node)
+        base_score = score_node(node)          # ← projected state
 
         if next_vm exists:
-            simulate place(vm, node)
-            if node fits next_vm → lookahead_score = score_node(node)
-            else                 → lookahead_score = _LOOKAHEAD_PENALTY
-            undo place
+            if node fits next_vm:
+                place(next_vm, node)
+                lookahead_score = score_node(node)  # ← projected with both VMs
+                unplace(next_vm, node)
+            else:
+                lookahead_score = _LOOKAHEAD_PENALTY
 
+        unplace(vm, node)
         total = base_score + 0.5 × lookahead_score
     """
     best_node = candidates[0]
     best_total = float("-inf")
 
     for node in candidates:
+        # ── Projected base score (with VM placed) ──────────────
+        state.place(vm, node)
         base = score_node(node, weights)
 
+        # ── Lookahead (with both VM *and* next VM placed) ──────
         lookahead = 0.0
         if next_vm is not None:
-            # Tentatively place current VM
-            state.place(vm, node)
-            lookahead = score_node(node, weights) if node.fits(next_vm) else _LOOKAHEAD_PENALTY
-            # Rollback
-            state.unplace(vm, node)
+            if node.fits(next_vm):
+                state.place(next_vm, node)
+                lookahead = score_node(node, weights)
+                state.unplace(next_vm, node)
+            else:
+                lookahead = _LOOKAHEAD_PENALTY
+
+        # ── Rollback current VM ────────────────────────────────
+        state.unplace(vm, node)
 
         total = base + _LOOKAHEAD_WEIGHT * lookahead
         if total > best_total:

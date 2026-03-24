@@ -1,4 +1,4 @@
-"""Tests for algorithms.scorer — K8s-like node scoring (HLD §6.1)."""
+"""Tests for algorithms.scorer — weighted node scoring (HLD §6.1)."""
 
 from __future__ import annotations
 
@@ -117,32 +117,58 @@ class TestPodHeadroomScore:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# fragmentation_penalty
+# fragmentation_penalty (stranded capacity)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestFragmentationPenalty:
-    """frag = (memory_remaining / memory_total)²."""
+    """Stranded capacity = (cpu_remaining% − memory_remaining%)²."""
 
     def test_empty_node(self) -> None:
-        """Empty → remaining=total → penalty = 1.0."""
+        """Empty → both at 100% remaining → diff=0 → penalty=0."""
         n = _node()
-        assert fragmentation_penalty(n) == pytest.approx(1.0)
-
-    def test_full_node(self) -> None:
-        """Full → remaining=0 → penalty = 0.0."""
-        n = _node(memory_used=100_000.0)
         assert fragmentation_penalty(n) == pytest.approx(0.0)
 
-    def test_half_used(self) -> None:
-        """50% used → remaining=50% → penalty = 0.25."""
-        n = _node(memory_used=50_000.0)
-        assert fragmentation_penalty(n) == pytest.approx(0.25)
+    def test_full_node(self) -> None:
+        """Full → both at 0% remaining → diff=0 → penalty=0."""
+        n = _node(cpu_used=100.0, memory_used=100_000.0)
+        assert fragmentation_penalty(n) == pytest.approx(0.0)
 
-    def test_90_percent_used(self) -> None:
-        """90% used → 10% remaining → penalty = 0.01."""
-        n = _node(memory_used=90_000.0)
+    def test_balanced_half_used(self) -> None:
+        """50% CPU and 50% memory used → remaining (50%, 50%) → penalty=0."""
+        n = _node(cpu_used=50.0, memory_used=50_000.0)
+        assert fragmentation_penalty(n) == pytest.approx(0.0)
+
+    def test_cpu_bound(self) -> None:
+        """CPU 90% used, memory 30% used → remaining (10%, 70%).
+
+        diff = 0.10 − 0.70 = −0.60 → penalty = 0.36
+        """
+        n = _node(cpu_used=90.0, memory_used=30_000.0)
+        assert fragmentation_penalty(n) == pytest.approx(0.36)
+
+    def test_memory_bound(self) -> None:
+        """CPU 40% used, memory 95% used → remaining (60%, 5%).
+
+        diff = 0.60 − 0.05 = 0.55 → penalty = 0.3025
+        """
+        n = _node(cpu_used=40.0, memory_used=95_000.0)
+        assert fragmentation_penalty(n) == pytest.approx(0.3025)
+
+    def test_slight_imbalance(self) -> None:
+        """CPU 50% used, memory 60% used → remaining (50%, 40%).
+
+        diff = 0.50 − 0.40 = 0.10 → penalty = 0.01
+        """
+        n = _node(cpu_used=50.0, memory_used=60_000.0)
         assert fragmentation_penalty(n) == pytest.approx(0.01)
+
+    def test_zero_total_guard(self) -> None:
+        """Zero-capacity node → 0.0 (safety net)."""
+        n = _node(cpu_total=100.0, memory_total=100_000.0)
+        # Manually override totals to test the guard
+        n_zero = n.model_copy(update={"cpu_total": 0.0})
+        assert fragmentation_penalty(n_zero) == pytest.approx(0.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -151,24 +177,30 @@ class TestFragmentationPenalty:
 
 
 class TestScoreNode:
-    """Weighted combination: α·balance + β·spread + γ·pod_headroom − δ·frag."""
+    """Weighted combination: α·balance + β·spread + γ·pod_headroom − δ·stranded."""
 
     def test_with_default_weights(self) -> None:
-        """Smoke test with default AlgorithmWeights."""
+        """Smoke test with default AlgorithmWeights.
+
+        Node at 50% CPU, 50% memory, 50 pods:
+        - balance = 1.0 (perfectly balanced)
+        - spread = 0.5
+        - pod_headroom = 0.8
+        - stranded = (0.5 − 0.5)² = 0.0 (balanced remaining)
+        """
         weights = AlgorithmWeights()
         n = _node(cpu_used=50.0, memory_used=50_000.0, pods_used=50)
         score = score_node(n, weights)
-        # balance=1.0, spread=0.5, pod_headroom=0.8, frag=0.25
         expected = (
             0.3 * 1.0  # balance
             + 0.3 * 0.5  # spread
             + 0.1 * 0.8  # pod_headroom
-            - 0.3 * 0.25  # fragmentation
+            - 0.3 * 0.0  # stranded penalty (balanced remaining)
         )
         assert score == pytest.approx(expected)
 
     def test_uniform_weights(self) -> None:
-        """All weights equal (0.25 each)."""
+        """All weights equal (0.25 each) on an empty node."""
         weights = AlgorithmWeights(
             alpha_balance=0.25,
             beta_spread=0.25,
@@ -176,8 +208,8 @@ class TestScoreNode:
             delta_frag_penalty=0.25,
         )
         n = _node()  # empty node
-        # balance=1.0, spread=1.0, pod_headroom=1.0, frag=1.0
-        expected = 0.25 * 1.0 + 0.25 * 1.0 + 0.25 * 1.0 - 0.25 * 1.0
+        # balance=1.0, spread=1.0, pod_headroom=1.0, stranded=0.0
+        expected = 0.25 * 1.0 + 0.25 * 1.0 + 0.25 * 1.0 - 0.25 * 0.0
         assert score_node(n, weights) == pytest.approx(expected)
 
     def test_pure_balance_weight(self) -> None:
@@ -202,6 +234,22 @@ class TestScoreNode:
         n_light = _node(cpu_used=20.0, memory_used=20_000.0)
         n_heavy = _node(cpu_used=80.0, memory_used=80_000.0)
         assert score_node(n_light, weights) > score_node(n_heavy, weights)
+
+    def test_stranded_penalty_penalizes_imbalanced_node(self) -> None:
+        """A node with lopsided remaining capacity should score lower
+        when delta_frag_penalty is active."""
+        weights = AlgorithmWeights(
+            alpha_balance=0.0,
+            beta_spread=0.0,
+            gamma_pod_headroom=0.0,
+            delta_frag_penalty=1.0,
+        )
+        # Balanced remaining: 50% CPU, 50% memory
+        balanced = _node(cpu_used=50.0, memory_used=50_000.0)
+        # Lopsided remaining: 10% CPU, 70% memory → stranded penalty = 0.36
+        lopsided = _node(cpu_used=90.0, memory_used=30_000.0)
+
+        assert score_node(balanced, weights) > score_node(lopsided, weights)
 
     def test_score_is_deterministic(self) -> None:
         """Same inputs always produce the same score."""

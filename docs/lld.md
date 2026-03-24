@@ -140,18 +140,20 @@ class PlacementEngine:
         bind(vm, best)
 
 class Scorer:
+    # Component scores — each ∈ [0, 1]
+    def balance_score(node) -> float        # 1 - abs(cpu_util - mem_util)
+    def spread_score(node) -> float         # ((1-cpu_util)+(1-mem_util))/2
+    def pod_headroom_score(node) -> float   # 1 - (pods_used / pods_total)
+    def fragmentation_penalty(node) -> float  # (cpu_rem% - mem_rem%)²
 
-    def score(node, vm) -> float
-
-    def balance(node)
-    def spread(node)
-    def fragmentation(node)
+    # Weighted combination
+    def score_node(node, weights) -> float  # α·balance + β·spread + γ·pod − δ·frag
 
 class Expander:
 
-    def select_profile(catalog)
+    def select_profile(catalog)     # cheapest profile that fits the VM
 
-    def create_node(profile)
+    def create_node(profile)        # normalize + build catalog node
 
 ```
 
@@ -165,7 +167,7 @@ To ensure enterprise-grade reliability, the codebase must pass a rigorous multi-
 ### 3.1 Unit Tests (Math & Transformation)
 * **MCO Overheads:** Hardcode 5 physical node sizes (e.g., 64GB, 256GB, 1TB). Assert that the `normalizer.py` outputs the exact usable capacity down to the Megabyte as specified by the Red Hat `kubelet-auto-sizing.yaml` math.
 * **ETL Filtering:** Feed a mocked RVTools DataFrame containing 10 `poweredOn` VMs, 5 `poweredOff`, 3 `SRM Placeholders`, and 2 `Templates`. Assert the parser returns exactly 10 VMs.
-* **Score Vectors:** Inject mocked Node states into the scoring function. Assert that a node with highly lopsided memory utilization generates a massive `fragmentation_penalty`.
+* **Score Vectors:** Inject mocked Node states into the scoring function. Assert that a node with lopsided remaining CPU/memory generates a high `stranded_penalty` (fragmentation_penalty).
 
 ### 3.2 Integration Tests (The Placement Engine)
 * **Inventory Priority:** Provide 5 inventory nodes and a catalog. Pass 5 tiny VMs. Assert that the `placement_engine` outputs 0 catalog nodes, proving it respects the `Cost = 0` inventory boundaries.
@@ -199,6 +201,7 @@ virtpack plan \
 | --catalog           | Greenfield hardware catalog                     |
 | --inventory         | Existing brownfield nodes                       |
 | --output            | Directory for placement_map.csv                 |
+| --strategy          | `spread` (default) or `consolidate` (HLD §1.1) |
 | --debug             | Verbose placement logs & Fit Failure Reasons    |
 | --no-auto-discovery | Disable vHost inventory auto-parsing            |
 
@@ -233,7 +236,7 @@ Unplaced VMs: 2
   node-03 score: 0.82
     balance: 0.91
     spread: 0.70
-    fragmentation: 0.10
+    stranded: 0.02
 
   selected: node-03
 ```

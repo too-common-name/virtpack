@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from core.cluster_state import ClusterState
-from core.placement_engine import PlacementResult, _score_candidates, run_placement
+from core.placement_engine import (
+    PlacementResult,
+    _pull_from_pool,
+    _score_candidates,
+    run_placement,
+)
 from models.config import (
     AlgorithmWeights,
     CatalogConfig,
@@ -152,6 +157,52 @@ class TestScoreCandidates:
         )
         # Roomy should win because tight can't fit both v1 and v2
         assert best is roomy
+
+    def test_stranded_node_attracts_complementary_vm(self) -> None:
+        """Projected scoring: a stranded node should attract VMs that fix it.
+
+        Node A: memory-stranded (60% CPU used, 40% MEM used)
+            → remaining: 40% CPU, 60% MEM → penalty = (0.4 − 0.6)² = 0.04
+        Node B: balanced (50% CPU used, 50% MEM used)
+            → remaining: 50% CPU, 50% MEM → penalty = 0.00
+
+        VM: memory-heavy (1 CPU, 20_000 MB on 100 CPU / 100_000 MB nodes)
+
+        After projected placement:
+          Node A: 61% CPU, 60% MEM → remaining (39%, 40%) → penalty ≈ 0.0001
+          Node B: 51% CPU, 70% MEM → remaining (49%, 30%) → penalty ≈ 0.0361
+
+        Under stranded-only weights (δ=1), Node A now beats Node B because
+        the memory-heavy VM *fixes* A's imbalance while *creating* stranding on B.
+        """
+        weights = AlgorithmWeights(
+            alpha_balance=0.0,
+            beta_spread=0.0,
+            gamma_pod_headroom=0.0,
+            delta_frag_penalty=1.0,
+        )
+        n_stranded = _inv_node(index=1, cpu_total=100.0, memory_total=100_000.0)
+        n_stranded.cpu_used = 60.0
+        n_stranded.memory_used = 40_000.0
+
+        n_balanced = _inv_node(index=2, cpu_total=100.0, memory_total=100_000.0)
+        n_balanced.cpu_used = 50.0
+        n_balanced.memory_used = 50_000.0
+
+        state = ClusterState([n_stranded, n_balanced])
+        # Memory-heavy VM — should fix the memory-stranded node
+        mem_heavy_vm = _vm("fix-me", cpu=1.0, memory_mb=20_000.0)
+
+        best = _score_candidates(
+            candidates=[n_stranded, n_balanced],
+            vm=mem_heavy_vm,
+            next_vm=None,
+            state=state,
+            weights=weights,
+        )
+
+        # Stranded node wins because placing the VM *reduces* its penalty
+        assert best is n_stranded
 
     def test_lookahead_rollback_leaves_state_clean(self) -> None:
         """After scoring, no nodes should have modified usage."""
@@ -356,3 +407,261 @@ class TestRunPlacement:
 
         assert result.state.total_placed_vms == 0
         assert len(result.unplaced) == 3
+
+    # ── Spread / balance across identical nodes ────────────────────────
+
+    def test_spread_across_identical_nodes(self) -> None:
+        """VMs must be distributed across identical nodes, not piled on one.
+
+        Regression test: the original ``(remaining/total)²`` formula gave
+        empty nodes the maximum penalty, causing pile-up.  The current
+        stranded-capacity formula ``(cpu_rem% − mem_rem%)²`` is zero for
+        proportional workloads, letting ``spread_score`` dominate.
+
+        With 5 identical nodes and 10 identical VMs, each node should
+        get exactly 2 VMs.
+        """
+        n_nodes = 5
+        n_vms = 10
+        nodes = [
+            _inv_node(index=i, cpu_total=100.0, memory_total=500_000.0)
+            for i in range(1, n_nodes + 1)
+        ]
+        state = ClusterState(nodes)
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=8192.0) for i in range(n_vms)]
+
+        result = run_placement(vms=vms, state=state, config=_config(), catalog=None)
+
+        assert result.unplaced == []
+        assert result.state.total_placed_vms == n_vms
+
+        # Check spread: each node should have exactly 2 VMs
+        vm_counts = [len(result.state.node_vm_map[n.id]) for n in nodes]
+        assert vm_counts == [2] * n_nodes, f"Expected equal spread of 2 VMs/node, got {vm_counts}"
+
+    def test_spread_with_uneven_count(self) -> None:
+        """7 VMs on 3 identical nodes → no node should have >3 VMs.
+
+        This verifies near-even spread when VM count isn't a multiple
+        of node count.
+        """
+        nodes = [_inv_node(index=i, cpu_total=100.0, memory_total=500_000.0) for i in range(1, 4)]
+        state = ClusterState(nodes)
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=8192.0) for i in range(7)]
+
+        result = run_placement(vms=vms, state=state, config=_config(), catalog=None)
+
+        assert result.unplaced == []
+        vm_counts = sorted(len(result.state.node_vm_map[n.id]) for n in nodes)
+        # 7 VMs / 3 nodes → expect [2, 2, 3]
+        assert vm_counts == [2, 2, 3], f"Expected near-even spread [2,2,3], got {vm_counts}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _pull_from_pool (consolidation helper)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPullFromPool:
+    """Tests for the _pull_from_pool helper used in consolidate mode."""
+
+    def test_picks_node_that_fits(self) -> None:
+        """Should return a node from the pool that fits the VM."""
+        pool = [_inv_node(index=1, cpu_total=80.0, memory_total=300_000.0)]
+        vm = _vm("v1", cpu=2.0, memory_mb=4096.0)
+        result = _pull_from_pool(vm, pool)
+        assert result is not None
+        assert result.id == "inv-01"
+        assert pool == []  # node was removed from pool
+
+    def test_returns_none_when_no_fit(self) -> None:
+        """Should return None if no pool node can fit the VM."""
+        pool = [_inv_node(index=1, cpu_total=1.0, memory_total=1000.0)]
+        vm = _vm("v1", cpu=50.0, memory_mb=500_000.0)
+        result = _pull_from_pool(vm, pool)
+        assert result is None
+        assert len(pool) == 1  # pool unchanged
+
+    def test_returns_none_for_empty_pool(self) -> None:
+        """Empty pool → None."""
+        pool: list[Node] = []
+        vm = _vm("v1")
+        assert _pull_from_pool(vm, pool) is None
+
+    def test_prefers_largest_node(self) -> None:
+        """Should pick the node with the most capacity (consolidation heuristic)."""
+        small = _inv_node(index=1, cpu_total=10.0, memory_total=50_000.0)
+        large = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
+        pool = [small, large]
+        vm = _vm("v1", cpu=2.0, memory_mb=4096.0)
+        result = _pull_from_pool(vm, pool)
+        assert result is large
+        assert len(pool) == 1
+        assert pool[0] is small
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# run_placement — consolidation mode (inventory_pool)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestConsolidateMode:
+    """Tests for run_placement with inventory_pool (consolidate strategy)."""
+
+    def test_basic_consolidation(self) -> None:
+        """5 inventory nodes, 3 small VMs → should use only 1 node, 4 unused."""
+        pool = [_inv_node(index=i, cpu_total=80.0, memory_total=300_000.0) for i in range(1, 6)]
+        state = ClusterState()  # empty — consolidate mode
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(3)]
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=None,
+            inventory_pool=pool,
+        )
+
+        assert result.unplaced == []
+        assert result.state.total_placed_vms == 3
+        # Should use 1 node (all 3 VMs fit on one 80-core node)
+        assert len(result.state.nodes) == 1
+        assert len(result.unused_inventory) == 4
+
+    def test_consolidation_uses_fewer_nodes_than_spread(self) -> None:
+        """Consolidate must use ≤ nodes compared to spread for same workload."""
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+
+        # Spread mode
+        spread_state = ClusterState(
+            [_inv_node(index=i, cpu_total=80.0, memory_total=300_000.0) for i in range(1, 6)]
+        )
+        spread_result = run_placement(
+            vms=list(vms),
+            state=spread_state,
+            config=_config(),
+            catalog=None,
+        )
+        spread_active = len(spread_state.active_nodes)
+
+        # Consolidate mode
+        consolidate_pool = [
+            _inv_node(index=i, cpu_total=80.0, memory_total=300_000.0) for i in range(1, 6)
+        ]
+        consolidate_state = ClusterState()
+        consolidate_result = run_placement(
+            vms=list(vms),
+            state=consolidate_state,
+            config=_config(),
+            catalog=None,
+            inventory_pool=consolidate_pool,
+        )
+        consolidate_active = len(consolidate_state.nodes)
+
+        # Both should place all VMs
+        assert spread_result.unplaced == []
+        assert consolidate_result.unplaced == []
+
+        # Consolidate uses fewer or equal nodes
+        assert consolidate_active <= spread_active
+
+    def test_pool_exhausted_falls_back_to_catalog(self) -> None:
+        """When pool is exhausted, catalog expansion kicks in."""
+        # 1 small inventory node in pool
+        pool = [_inv_node(index=1, cpu_total=5.0, memory_total=10_000.0, pods_total=2)]
+        state = ClusterState()
+        # 5 VMs — more than the single pool node can hold
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(5)]
+        catalog = _catalog()
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=catalog,
+            inventory_pool=pool,
+        )
+
+        assert result.unplaced == []
+        assert result.state.total_placed_vms == 5
+        # Pool should be exhausted
+        assert len(result.unused_inventory) == 0
+        # Some catalog nodes should have been created
+        assert len(result.state.catalog_nodes) >= 1
+
+    def test_pool_exhausted_no_catalog_unplaced(self) -> None:
+        """Pool exhausted + no catalog → unplaced VMs."""
+        pool = [_inv_node(index=1, cpu_total=3.0, memory_total=5000.0, pods_total=1)]
+        state = ClusterState()
+        vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(3)]
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=None,
+            inventory_pool=pool,
+        )
+
+        assert result.state.total_placed_vms == 1
+        assert len(result.unplaced) == 2
+        assert len(result.unused_inventory) == 0
+
+    def test_unused_inventory_returned(self) -> None:
+        """Unused pool nodes appear in result.unused_inventory."""
+        pool = [_inv_node(index=i, cpu_total=80.0, memory_total=300_000.0) for i in range(1, 4)]
+        state = ClusterState()
+        vms = [_vm("v1", cpu=2.0, memory_mb=4096.0)]
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=None,
+            inventory_pool=pool,
+        )
+
+        assert result.state.total_placed_vms == 1
+        assert len(result.state.nodes) == 1
+        assert len(result.unused_inventory) == 2
+
+    def test_empty_pool_with_catalog(self) -> None:
+        """Empty pool + catalog → falls through to catalog expansion."""
+        state = ClusterState()
+        vms = [_vm("v1", cpu=2.0, memory_mb=4096.0)]
+        catalog = _catalog()
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=catalog,
+            inventory_pool=[],
+        )
+
+        assert result.unplaced == []
+        assert result.state.total_placed_vms == 1
+        assert len(result.state.catalog_nodes) == 1
+
+    def test_deterministic_consolidation(self) -> None:
+        """Consolidation produces identical results across runs."""
+
+        def do_run() -> tuple[dict[str, str], int]:
+            pool = [
+                _inv_node(index=i, cpu_total=80.0, memory_total=300_000.0) for i in range(1, 6)
+            ]
+            state = ClusterState()
+            vms = [_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+            result = run_placement(
+                vms=vms,
+                state=state,
+                config=_config(),
+                catalog=None,
+                inventory_pool=pool,
+            )
+            return result.state.placement_map, len(result.unused_inventory)
+
+        map1, unused1 = do_run()
+        map2, unused2 = do_run()
+        assert map1 == map2
+        assert unused1 == unused2

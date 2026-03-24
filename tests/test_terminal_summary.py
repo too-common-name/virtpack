@@ -92,28 +92,54 @@ class TestPercentile:
 
 
 class TestComputeCFI:
-    """Tests for Cluster Fragmentation Index (§8.2)."""
+    """Tests for Cluster Fragmentation Index — stranded capacity (§8.2).
 
-    def test_empty_nodes(self) -> None:
+    CFI = average(stranded_penalty) where stranded_penalty =
+    (cpu_remaining% − memory_remaining%)².
+
+    Lower = remaining capacity is better balanced = good.
+    """
+
+    def test_empty_list(self) -> None:
         assert _compute_cfi([]) == 0.0
 
-    def test_fully_loaded_nodes(self) -> None:
-        """Nodes at 100% memory → frag penalty = 0 → CFI = 0."""
-        n = _make_node("n1", memory_total=100_000.0)
+    def test_balanced_empty_node(self) -> None:
+        """Empty node → remaining (100%, 100%) → diff=0 → CFI=0."""
+        n = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
+        assert _compute_cfi([n]) == pytest.approx(0.0)
+
+    def test_balanced_full_node(self) -> None:
+        """Fully loaded node → remaining (0%, 0%) → diff=0 → CFI=0."""
+        n = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
+        n.cpu_used = 100.0
         n.memory_used = 100_000.0
         assert _compute_cfi([n]) == pytest.approx(0.0)
 
-    def test_empty_nodes_high_frag(self) -> None:
-        """Empty nodes → frag penalty = (1.0)² = 1.0 → CFI = 1.0."""
-        n = _make_node("n1", memory_total=100_000.0)
-        assert _compute_cfi([n]) == pytest.approx(1.0)
+    def test_balanced_half_used(self) -> None:
+        """Both at 50% → remaining (50%, 50%) → diff=0 → CFI=0."""
+        n = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
+        n.cpu_used = 50.0
+        n.memory_used = 50_000.0
+        assert _compute_cfi([n]) == pytest.approx(0.0)
 
-    def test_average_of_two_nodes(self) -> None:
-        """One full, one empty → CFI = (0.0 + 1.0) / 2 = 0.5."""
-        full = _make_node("n1", memory_total=100_000.0)
-        full.memory_used = 100_000.0
-        empty = _make_node("n2", memory_total=100_000.0)
-        assert _compute_cfi([full, empty]) == pytest.approx(0.5)
+    def test_cpu_bound_node(self) -> None:
+        """CPU 90%, memory 30% → remaining (10%, 70%) → penalty=0.36."""
+        n = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
+        n.cpu_used = 90.0
+        n.memory_used = 30_000.0
+        assert _compute_cfi([n]) == pytest.approx(0.36)
+
+    def test_average_of_balanced_and_stranded(self) -> None:
+        """One balanced, one stranded → CFI = (0.0 + 0.36) / 2 = 0.18."""
+        balanced = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
+        balanced.cpu_used = 50.0
+        balanced.memory_used = 50_000.0
+
+        stranded = _make_node("n2", cpu_total=100.0, memory_total=100_000.0)
+        stranded.cpu_used = 90.0
+        stranded.memory_used = 30_000.0
+
+        assert _compute_cfi([balanced, stranded]) == pytest.approx(0.18)
 
 
 class TestDetermineBottleneck:
@@ -256,6 +282,27 @@ class TestComputeSummary:
         assert summary.headroom_cpu == pytest.approx(0.4)
         assert summary.headroom_memory == pytest.approx(0.3)
 
+    def test_shutdown_candidates_none(self) -> None:
+        """No unused_inventory → shutdown_candidates = 0."""
+        state = ClusterState([_make_node("n1")])
+        summary = compute_summary(state=state, vms=[], unplaced=[])
+        assert summary.shutdown_candidates == 0
+
+    def test_shutdown_candidates_with_unused(self) -> None:
+        """Unused inventory nodes are reported as shutdown candidates."""
+        n1 = _make_node("n1")
+        state = ClusterState([n1])
+        unused = [_make_node("n2"), _make_node("n3")]
+
+        summary = compute_summary(
+            state=state,
+            vms=[],
+            unplaced=[],
+            unused_inventory=unused,
+        )
+
+        assert summary.shutdown_candidates == 2
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Render smoke test
@@ -323,6 +370,36 @@ class TestRenderSummary:
         render_summary(summary)
         captured = capsys.readouterr()
         assert "Unplaced VMs: 0" in captured.out
+
+    def test_render_shutdown_candidates(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Shutdown candidates are displayed when > 0."""
+        summary = PlanSummary(
+            total_nodes=3,
+            inventory_nodes=3,
+            catalog_nodes=0,
+            ha_nodes=0,
+            total_vms=5,
+            placed_vms=5,
+            unplaced_vms=0,
+            cluster_cpu_util=0.5,
+            cluster_memory_util=0.5,
+            peak_cpu_util=0.5,
+            peak_memory_util=0.5,
+            bottleneck="BALANCED",
+            headroom_cpu=0.5,
+            headroom_memory=0.5,
+            cfi=0.01,
+            pressure_p95=0.5,
+            pressure_max=0.5,
+            ha_fully_covered=True,
+            ha_deficit_cpu=0.0,
+            ha_deficit_memory=0.0,
+            shutdown_candidates=7,
+        )
+        render_summary(summary)
+        captured = capsys.readouterr()
+        assert "Shutdown" in captured.out
+        assert "7" in captured.out
 
     def test_render_ha_deficit(self, capsys: pytest.CaptureFixture[str]) -> None:
         """HA deficit triggers a warning panel."""

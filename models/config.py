@@ -12,9 +12,30 @@ coerce cleanly to ``float`` fields during parsing.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+# ═══════════════════════════════════════════════════════════════════════
+# 0. Placement strategy (HLD §1.1)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class PlacementStrategy(StrEnum):
+    """Controls how inventory nodes are fed to the placement engine.
+
+    * ``spread``  — All inventory nodes are added upfront; the scorer
+      distributes VMs evenly across the full fleet.
+    * ``consolidate`` — Inventory nodes are held in a pool and pulled
+      lazily (one at a time, like catalog expansion).  Unused inventory
+      nodes are reported as candidates for shutdown, saving OCP
+      subscriptions.
+    """
+
+    SPREAD = "spread"
+    CONSOLIDATE = "consolidate"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # 1. config.yaml  (HLD §3.2)
@@ -204,6 +225,14 @@ class PlanConfig(BaseModel):
     virt_overheads: VirtOverheads = Field(default_factory=VirtOverheads)
     safety_margins: SafetyMargins = Field(default_factory=SafetyMargins)
     algorithm_weights: AlgorithmWeights = Field(default_factory=AlgorithmWeights)
+    placement_strategy: PlacementStrategy = Field(
+        default=PlacementStrategy.SPREAD,
+        description=(
+            "How inventory nodes are introduced to the placement engine. "
+            "'spread' adds all upfront (use all hardware); "
+            "'consolidate' adds lazily (minimize active nodes / subscriptions)."
+        ),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════

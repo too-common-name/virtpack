@@ -420,3 +420,158 @@ profiles:
         assert result.exit_code == 0, result.output
         assert nested_out.exists()
         assert (nested_out / "placement_map.csv").exists()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Consolidation strategy tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestConsolidateStrategy:
+    """Tests for ``--strategy consolidate`` CLI flag."""
+
+    def test_consolidate_places_all_vms(self, tmp_path: Path) -> None:
+        """Consolidate mode places all VMs on fewer nodes."""
+        cfg = _write_config_yaml(tmp_path)
+        inv = _write_inventory_yaml(tmp_path)  # 2 generous nodes
+        xlsx = _write_rvtools_xlsx(tmp_path, vm_count=3)
+        out_dir = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "--rvtools",
+                str(xlsx),
+                "--config",
+                str(cfg),
+                "--inventory",
+                str(inv),
+                "--output",
+                str(out_dir),
+                "--no-auto-discovery",
+                "--strategy",
+                "consolidate",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert (out_dir / "placement_map.csv").exists()
+        # All 3 VMs should be placed
+        csv_lines = (out_dir / "placement_map.csv").read_text().strip().splitlines()
+        assert len(csv_lines) == 4  # header + 3
+
+    def test_consolidate_uses_fewer_nodes(self, tmp_path: Path) -> None:
+        """Consolidate should use fewer nodes than spread for the same input."""
+        cfg = _write_config_yaml(tmp_path)
+        inv = _write_inventory_yaml(tmp_path)  # 2 generous nodes
+        xlsx = _write_rvtools_xlsx(tmp_path, vm_count=2)
+
+        # Spread
+        out_spread = tmp_path / "out_spread"
+        result_spread = runner.invoke(
+            app,
+            [
+                "--rvtools",
+                str(xlsx),
+                "--config",
+                str(cfg),
+                "--inventory",
+                str(inv),
+                "--output",
+                str(out_spread),
+                "--no-auto-discovery",
+                "--strategy",
+                "spread",
+            ],
+        )
+        assert result_spread.exit_code == 0, result_spread.output
+
+        # Consolidate
+        out_cons = tmp_path / "out_cons"
+        result_cons = runner.invoke(
+            app,
+            [
+                "--rvtools",
+                str(xlsx),
+                "--config",
+                str(cfg),
+                "--inventory",
+                str(inv),
+                "--output",
+                str(out_cons),
+                "--no-auto-discovery",
+                "--strategy",
+                "consolidate",
+            ],
+        )
+        assert result_cons.exit_code == 0, result_cons.output
+
+        # Count distinct nodes used in each placement map
+        def _count_nodes(csv_path: Path) -> int:
+            import csv as _csv
+
+            with csv_path.open() as f:
+                reader = _csv.DictReader(f)
+                return len({row["Target_Node"] for row in reader})
+
+        spread_nodes = _count_nodes(out_spread / "placement_map.csv")
+        cons_nodes = _count_nodes(out_cons / "placement_map.csv")
+
+        # Consolidate should use fewer or equal nodes
+        assert cons_nodes <= spread_nodes
+
+    def test_consolidate_reports_shutdown(self, tmp_path: Path) -> None:
+        """Consolidate mode should mention 'Shutdown' in output."""
+        cfg = _write_config_yaml(tmp_path)
+        inv = _write_inventory_yaml(tmp_path)  # 2 generous nodes
+        xlsx = _write_rvtools_xlsx(tmp_path, vm_count=1)  # 1 tiny VM
+        out_dir = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "--rvtools",
+                str(xlsx),
+                "--config",
+                str(cfg),
+                "--inventory",
+                str(inv),
+                "--output",
+                str(out_dir),
+                "--no-auto-discovery",
+                "--strategy",
+                "consolidate",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        # With 2 inventory nodes and 1 small VM, 1 node should be unused
+        assert "Shutdown" in result.output
+
+    def test_consolidate_debug_shows_strategy(self, tmp_path: Path) -> None:
+        """Debug mode should print the strategy name."""
+        cfg = _write_config_yaml(tmp_path)
+        inv = _write_inventory_yaml(tmp_path)
+        xlsx = _write_rvtools_xlsx(tmp_path, vm_count=1)
+        out_dir = tmp_path / "out"
+
+        result = runner.invoke(
+            app,
+            [
+                "--rvtools",
+                str(xlsx),
+                "--config",
+                str(cfg),
+                "--inventory",
+                str(inv),
+                "--output",
+                str(out_dir),
+                "--no-auto-discovery",
+                "--strategy",
+                "consolidate",
+                "--debug",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert "consolidate" in result.output.lower()

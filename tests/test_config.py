@@ -12,6 +12,7 @@ from models.config import (
     InventoryConfig,
     InventoryProfile,
     OvercommitConfig,
+    PlacementStrategy,
     PlanConfig,
     SafetyMargins,
     UtilizationTargets,
@@ -38,6 +39,7 @@ class TestPlanConfigDefaults:
         assert cfg.safety_margins.utilization_targets.cpu == 85.0
         assert cfg.safety_margins.utilization_targets.memory == 80.0
         assert cfg.safety_margins.ha_failures_to_tolerate == 1
+        assert cfg.placement_strategy == PlacementStrategy.SPREAD
 
     def test_frozen(self) -> None:
         cfg = PlanConfig()
@@ -303,3 +305,35 @@ class TestSafetyMargins:
         """ha=0 is valid (no HA requirement)."""
         s = SafetyMargins(ha_failures_to_tolerate=0)
         assert s.ha_failures_to_tolerate == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PlacementStrategy
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPlacementStrategy:
+    """Tests for the PlacementStrategy enum."""
+
+    def test_spread_value(self) -> None:
+        assert PlacementStrategy.SPREAD.value == "spread"
+
+    def test_consolidate_value(self) -> None:
+        assert PlacementStrategy.CONSOLIDATE.value == "consolidate"
+
+    def test_default_in_plan_config(self) -> None:
+        cfg = PlanConfig()
+        assert cfg.placement_strategy is PlacementStrategy.SPREAD
+
+    def test_set_consolidate_in_plan_config(self) -> None:
+        cfg = PlanConfig(placement_strategy=PlacementStrategy.CONSOLIDATE)
+        assert cfg.placement_strategy is PlacementStrategy.CONSOLIDATE
+
+    def test_string_coercion_in_plan_config(self) -> None:
+        """YAML parsing will pass a string; Pydantic should coerce it."""
+        cfg = PlanConfig.model_validate({"placement_strategy": "consolidate"})
+        assert cfg.placement_strategy is PlacementStrategy.CONSOLIDATE
+
+    def test_invalid_strategy_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            PlanConfig(placement_strategy="random")  # type: ignore[arg-type]

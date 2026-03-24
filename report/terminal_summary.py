@@ -7,7 +7,7 @@ rendering and logic strictly decoupled.
 Key metrics:
 
 * **Cluster Plan Summary** (§8.1) — node counts, utilization, bottleneck.
-* **Cluster Fragmentation Index** (§8.2) — average frag penalty.
+* **Cluster Fragmentation Index** (§8.2) — average stranded capacity penalty.
 * **Node Pressure Index** (§8.3) — P95 and max pressure.
 """
 
@@ -75,6 +75,9 @@ class PlanSummary:
     ha_deficit_cpu: float
     ha_deficit_memory: float
 
+    # Consolidation — nodes that can be powered off (HLD §1.1 Scenario A2)
+    shutdown_candidates: int = 0
+
     # Unplaced VM names (for detail section)
     unplaced_vm_names: list[str] = field(default_factory=list)
 
@@ -101,7 +104,12 @@ def _percentile(values: list[float], pct: float) -> float:
 
 
 def _compute_cfi(nodes: list[Node]) -> float:
-    """Cluster Fragmentation Index = average(fragmentation_penalty) — §8.2."""
+    """Cluster Fragmentation Index = average(stranded_penalty) — §8.2.
+
+    Measures how much remaining capacity is dimensionally stranded
+    on average across all nodes.  Lower = remaining capacity is
+    better balanced across CPU and memory = good.
+    """
     if not nodes:
         return 0.0
     return sum(fragmentation_penalty(n) for n in nodes) / len(nodes)
@@ -126,6 +134,7 @@ def compute_summary(
     vms: list[VM],
     unplaced: list[VM],
     ha_result: HAResult | None = None,
+    unused_inventory: list[Node] | None = None,
 ) -> PlanSummary:
     """Compute all summary metrics from the final placement state.
 
@@ -139,6 +148,9 @@ def compute_summary(
         VMs that could not be placed.
     ha_result : HAResult | None
         HA injection outcome.  ``None`` if HA was skipped.
+    unused_inventory : list[Node] | None
+        Inventory nodes that were NOT activated during consolidation.
+        ``None`` or empty in spread mode.
     """
     nodes = state.nodes
     ha_nodes_count = len(ha_result.nodes_added) if ha_result else 0
@@ -178,6 +190,9 @@ def compute_summary(
     ha_def_cpu = ha_result.deficit_cpu if ha_result else 0.0
     ha_def_mem = ha_result.deficit_memory if ha_result else 0.0
 
+    # ── Consolidation ─────────────────────────────────────────────
+    shutdown = len(unused_inventory) if unused_inventory else 0
+
     return PlanSummary(
         total_nodes=total_nodes,
         inventory_nodes=inventory_count,
@@ -199,6 +214,7 @@ def compute_summary(
         ha_fully_covered=ha_covered,
         ha_deficit_cpu=ha_def_cpu,
         ha_deficit_memory=ha_def_mem,
+        shutdown_candidates=shutdown,
         unplaced_vm_names=[vm.name for vm in unplaced],
     )
 
@@ -232,9 +248,23 @@ def render_summary(summary: PlanSummary) -> None:
         lines.append(f", {summary.ha_nodes} HA spare")
     lines.append(")\n")
 
+    # Consolidation: show nodes available for shutdown
+    if summary.shutdown_candidates > 0:
+        total_available = existing + summary.shutdown_candidates
+        lines.append(
+            f"Nodes Available for Shutdown: {summary.shutdown_candidates}"
+            f"  (of {total_available} total inventory)",
+            style="bold green",
+        )
+        lines.append("\n")
+
     # OCP subscriptions (each pair of sockets = 1 subscription)
     # For simplicity: total nodes = subscriptions (bare-metal 1:1)
-    lines.append(f"Required OCP Subscriptions: {summary.total_nodes}\n\n")
+    lines.append(f"Required OCP Subscriptions: {summary.total_nodes}\n")
+    if summary.shutdown_candidates > 0:
+        saved = summary.shutdown_candidates
+        lines.append(f"Subscription Savings: {saved} node(s) can be powered off\n", style="green")
+    lines.append("\n")
 
     # Utilization
     lines.append(f"Peak CPU Utilization:    {summary.peak_cpu_util:6.1%}\n")

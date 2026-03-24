@@ -10,6 +10,7 @@ Usage::
         --catalog catalog.yaml \\
         --inventory inventory.yaml \\
         --output ./out \\
+        --strategy spread \\
         --debug
 """
 
@@ -20,6 +21,8 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+
+from models.config import PlacementStrategy
 
 if TYPE_CHECKING:
     from models.config import PlanConfig
@@ -114,6 +117,18 @@ def plan(
         Path,
         typer.Option("--output", help="Output directory for placement_map.csv"),
     ] = Path("./out"),
+    strategy: Annotated[
+        PlacementStrategy,
+        typer.Option(
+            "--strategy",
+            help=(
+                "Placement strategy: 'spread' distributes VMs across all "
+                "inventory nodes; 'consolidate' packs VMs tightly and "
+                "reports nodes that can be powered off."
+            ),
+            case_sensitive=False,
+        ),
+    ] = PlacementStrategy.SPREAD,
     debug: Annotated[
         bool,
         typer.Option("--debug", help="Verbose placement logs"),
@@ -154,6 +169,9 @@ def plan(
         _console.print(f"[red]Error loading config:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
+    # CLI --strategy overrides config.yaml placement_strategy
+    effective_strategy = strategy
+
     try:
         inventory_config = load_inventory_config(inventory_path)
     except ConfigLoadError as exc:
@@ -174,6 +192,7 @@ def plan(
 
     if debug:
         out.print(f"[dim]Parsed {len(raw_vms)} VMs from vInfo[/dim]")
+        out.print(f"[dim]Strategy: {effective_strategy.value}[/dim]")
 
     # ══════════════════════════════════════════════════════════════════
     # 2. TRANSFORM — Normalize VMs + Build Nodes
@@ -209,13 +228,26 @@ def plan(
     # ══════════════════════════════════════════════════════════════════
     # 3. PLACEMENT — Filter → Expand → Score → Bind
     # ══════════════════════════════════════════════════════════════════
-    state = ClusterState(inv_nodes)
+
+    if effective_strategy == PlacementStrategy.CONSOLIDATE:
+        # Consolidate: inventory nodes held in pool, pulled lazily
+        state = ClusterState()
+        inventory_pool = inv_nodes
+        if debug:
+            out.print(
+                f"[dim]Consolidate mode: {len(inventory_pool)} inventory nodes in pool[/dim]"
+            )
+    else:
+        # Spread (default): all inventory nodes added upfront
+        state = ClusterState(inv_nodes)
+        inventory_pool = None
 
     result = run_placement(
         vms=vms,
         state=state,
         config=plan_config,
         catalog=catalog_config,
+        inventory_pool=inventory_pool,
     )
 
     catalog_node_count = len(state.catalog_nodes)
@@ -226,6 +258,11 @@ def plan(
             f"{len(result.unplaced)} unplaced, "
             f"{catalog_node_count} catalog nodes added[/dim]"
         )
+        if result.unused_inventory:
+            out.print(
+                f"[dim]Unused inventory nodes: {len(result.unused_inventory)} "
+                f"(can be shut down)[/dim]"
+            )
 
     # ══════════════════════════════════════════════════════════════════
     # 4. HA INJECTION
@@ -258,6 +295,7 @@ def plan(
         vms=vms,
         unplaced=result.unplaced,
         ha_result=ha_result,
+        unused_inventory=result.unused_inventory if result.unused_inventory else None,
     )
     render_summary(summary)
 

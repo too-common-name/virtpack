@@ -1,8 +1,6 @@
-"""``virtpack plan`` CLI entry point (LLD §4).
+"""``virtpack`` CLI entry point (LLD §4).
 
-Orchestrates the full ETL → Normalize → Place → HA → Report pipeline.
-
-Usage::
+Commands::
 
     virtpack plan \\
         --rvtools rvtools.xlsx \\
@@ -12,6 +10,8 @@ Usage::
         --output ./out \\
         --strategy spread \\
         --debug
+
+    virtpack init [--output-dir .]
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from rich.console import Console
 from models.config import PlacementStrategy
 
 if TYPE_CHECKING:
+    from loaders.rvtools_parser import RawHost
     from models.config import PlanConfig
     from models.node import Node
 
@@ -36,6 +37,154 @@ app = typer.Typer(
 )
 
 _console = Console(stderr=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Stub YAML templates
+# ═══════════════════════════════════════════════════════════════════════
+
+_CONFIG_STUB = """\
+# virtpack config.yaml — global tuning parameters
+# All values below are defaults; remove or adjust as needed.
+
+cluster_limits:
+  max_pods_per_node: 250
+
+overcommit:
+  cpu_ratio: 8.0          # 8 vCPU → 1 physical core
+  memory_ratio: 1.0        # no memory overcommit (1:1 reservation)
+
+virt_overheads:
+  ht_efficiency_factor: 1.5  # HT threads ≠ full cores (Red Hat guide: 1.5)
+  ocp_virt_core: 2.0         # CPU cores reserved for OCP Virt stack
+  ocp_virt_memory_mb: 360.0  # Memory reserved for OCP Virt stack
+  eviction_hard_mb: 100.0    # kubelet hard eviction threshold
+
+safety_margins:
+  utilization_targets:
+    cpu: 85.0              # % — max CPU utilization before node is "full"
+    memory: 80.0           # % — max memory utilization
+  ha_failures_to_tolerate: 1
+
+algorithm_weights:
+  # Weights must sum to 1.0
+  alpha_balance: 0.3       # CPU/Memory balance
+  beta_spread: 0.3         # LeastAllocated (even distribution)
+  gamma_pod_headroom: 0.1  # Pod IP headroom
+  delta_frag_penalty: 0.3  # Stranded capacity penalty
+
+placement_strategy: spread  # spread | consolidate
+"""
+
+_INVENTORY_STUB = """\
+# virtpack inventory.yaml — brownfield (existing) hardware
+# Define your existing bare-metal servers here.
+# These nodes have cost_weight=0 (already owned).
+#
+# Tip: If you're using RVTools, vHost auto-discovery will build
+# inventory nodes automatically — you may not need this file.
+
+profiles:
+  - profile_name: dell-r740
+    cpu_topology:
+      sockets: 2
+      cores_per_socket: 16
+      threads_per_core: 2   # 1 = no HT, 2 = HT enabled
+    ram_gb: 512
+    quantity: 3              # 3 identical nodes
+
+  # - profile_name: dell-r760
+  #   cpu_topology:
+  #     sockets: 2
+  #     cores_per_socket: 24
+  #     threads_per_core: 2
+  #   ram_gb: 768
+  #   quantity: 2
+"""
+
+_CATALOG_STUB = """\
+# virtpack catalog.yaml — greenfield hardware available for purchase
+# The Expander will pick the cheapest profile that fits a VM when
+# no existing inventory node has capacity.
+#
+# This file is optional. Omit it for pure brownfield (lift-and-shift).
+
+profiles:
+  - profile_name: dell-r760-small
+    cpu_topology:
+      sockets: 2
+      cores_per_socket: 16
+      threads_per_core: 2
+    ram_gb: 512
+    cost_weight: 1.0         # relative cost (lower = preferred)
+
+  - profile_name: dell-r760-large
+    cpu_topology:
+      sockets: 2
+      cores_per_socket: 24
+      threads_per_core: 2
+    ram_gb: 768
+    cost_weight: 1.5
+"""
+
+_STUBS: dict[str, str] = {
+    "config.yaml": _CONFIG_STUB,
+    "inventory.yaml": _INVENTORY_STUB,
+    "catalog.yaml": _CATALOG_STUB,
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# init command — generate stub config files
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@app.command()
+def init(
+    output_dir: Annotated[
+        Path,
+        typer.Option("--output-dir", "-o", help="Directory to write stub files into"),
+    ] = Path("."),
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Overwrite existing files"),
+    ] = False,
+) -> None:
+    """Generate stub config.yaml, inventory.yaml, and catalog.yaml files.
+
+    Creates annotated YAML templates with sensible defaults that you
+    can edit for your environment.
+    """
+    out = Console()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[str] = []
+    skipped: list[str] = []
+
+    for filename, content in _STUBS.items():
+        target = output_dir / filename
+        if target.exists() and not force:
+            skipped.append(filename)
+            continue
+        target.write_text(content)
+        written.append(filename)
+
+    if written:
+        for name in written:
+            out.print(f"  [bold green]✓[/bold green] {output_dir / name}")
+    if skipped:
+        for name in skipped:
+            out.print(f"  [yellow]⏭ {name}[/yellow]  (already exists, use --force to overwrite)")
+
+    if written:
+        out.print(
+            f"\n[bold]Edit the files in [cyan]{output_dir}[/cyan], then run:[/bold]\n"
+            f"  virtpack plan --rvtools export.xlsx "
+            f"--config {output_dir / 'config.yaml'} "
+            f"--inventory {output_dir / 'inventory.yaml'}"
+        )
+    elif skipped:
+        out.print("\n[dim]No files written. All stubs already exist.[/dim]")
 
 
 # ═══════════════════════════════════════════════════════════════════════

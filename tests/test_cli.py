@@ -1,4 +1,4 @@
-"""Tests for cli/main.py — the ``virtpack plan`` CLI entry point (LLD §4).
+"""Tests for cli/main.py — the ``virtpack`` CLI entry point (LLD §4).
 
 Uses ``typer.testing.CliRunner`` for isolated, non-interactive invocations.
 Each test creates its own YAML config + RVTools fixtures in a ``tmp_path``.
@@ -16,6 +16,76 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 runner = CliRunner()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# init command tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestInitCommand:
+    """Tests for the ``virtpack init`` command."""
+
+    def test_generates_all_stubs(self, tmp_path: Path) -> None:
+        """Init creates config.yaml, inventory.yaml, and catalog.yaml."""
+        result = runner.invoke(app, ["init", "--output-dir", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+
+        assert (tmp_path / "config.yaml").exists()
+        assert (tmp_path / "inventory.yaml").exists()
+        assert (tmp_path / "catalog.yaml").exists()
+
+    def test_stubs_are_valid_yaml(self, tmp_path: Path) -> None:
+        """Generated stubs parse and validate against Pydantic models."""
+        from loaders.yaml_loader import (
+            load_catalog_config,
+            load_inventory_config,
+            load_plan_config,
+        )
+
+        runner.invoke(app, ["init", "--output-dir", str(tmp_path)])
+
+        plan = load_plan_config(tmp_path / "config.yaml")
+        assert plan.overcommit.cpu_ratio == 8.0
+
+        inv = load_inventory_config(tmp_path / "inventory.yaml")
+        assert len(inv.profiles) == 1
+
+        cat = load_catalog_config(tmp_path / "catalog.yaml")
+        assert cat is not None
+        assert len(cat.profiles) == 2
+
+    def test_skips_existing_files(self, tmp_path: Path) -> None:
+        """Existing files are not overwritten without --force."""
+        (tmp_path / "config.yaml").write_text("# my custom config\n")
+
+        result = runner.invoke(app, ["init", "--output-dir", str(tmp_path)])
+        assert result.exit_code == 0
+
+        # config.yaml should NOT be overwritten
+        assert (tmp_path / "config.yaml").read_text() == "# my custom config\n"
+        # But others should be created
+        assert (tmp_path / "inventory.yaml").exists()
+        assert "already exists" in result.output
+
+    def test_force_overwrites(self, tmp_path: Path) -> None:
+        """--force overwrites existing files."""
+        (tmp_path / "config.yaml").write_text("# old\n")
+
+        result = runner.invoke(app, ["init", "--output-dir", str(tmp_path), "--force"])
+        assert result.exit_code == 0
+
+        content = (tmp_path / "config.yaml").read_text()
+        assert "cluster_limits" in content  # overwritten with stub
+
+    def test_creates_output_dir(self, tmp_path: Path) -> None:
+        """Output directory is auto-created if it doesn't exist."""
+        nested = tmp_path / "deep" / "nested"
+
+        result = runner.invoke(app, ["init", "--output-dir", str(nested)])
+        assert result.exit_code == 0
+        assert (nested / "config.yaml").exists()
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Fixture helpers
@@ -132,6 +202,7 @@ class TestPlanCommand:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -180,6 +251,7 @@ algorithm_weights:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -205,6 +277,7 @@ algorithm_weights:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -231,6 +304,7 @@ algorithm_weights:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -255,6 +329,7 @@ algorithm_weights:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -312,6 +387,7 @@ profiles:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -340,6 +416,7 @@ profiles:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(tmp_path / "nonexistent.xlsx"),
                 "--config",
@@ -362,6 +439,7 @@ profiles:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -382,6 +460,7 @@ profiles:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--output",
@@ -405,6 +484,7 @@ profiles:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -440,6 +520,7 @@ class TestConsolidateStrategy:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -471,6 +552,7 @@ class TestConsolidateStrategy:
         result_spread = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -491,6 +573,7 @@ class TestConsolidateStrategy:
         result_cons = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -530,6 +613,7 @@ class TestConsolidateStrategy:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",
@@ -558,6 +642,7 @@ class TestConsolidateStrategy:
         result = runner.invoke(
             app,
             [
+                "plan",
                 "--rvtools",
                 str(xlsx),
                 "--config",

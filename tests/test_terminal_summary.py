@@ -6,16 +6,23 @@ import pytest
 
 from core.cluster_state import ClusterState
 from core.ha_injector import HAResult
+from loaders.rvtools_parser import RawHost, RawVM
 from models.node import Node
 from models.vm import VM
 from report.terminal_summary import (
+    NodeDetail,
     PlanSummary,
+    VMwareSummary,
     _compute_cfi,
     _determine_bottleneck,
     _node_pressure,
     _percentile,
     compute_summary,
+    compute_vmware_summary,
+    render_comparison,
+    render_node_table,
     render_summary,
+    render_vmware_summary,
 )
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -46,6 +53,36 @@ def _make_node(
 
 def _make_vm(name: str, cpu: float = 2.0, memory_mb: float = 4096.0) -> VM:
     return VM(name=name, cpu=cpu, memory_mb=memory_mb)
+
+
+def _plan_summary(**overrides: object) -> PlanSummary:
+    """Build a PlanSummary with sensible defaults, overriding specific fields."""
+    defaults: dict[str, object] = {
+        "total_nodes": 2,
+        "inventory_nodes": 2,
+        "catalog_nodes": 0,
+        "ha_nodes": 0,
+        "total_vms": 5,
+        "placed_vms": 5,
+        "unplaced_vms": 0,
+        "cluster_cpu_util": 0.5,
+        "cluster_memory_util": 0.5,
+        "total_cpu_capacity": 200.0,
+        "total_memory_capacity_mb": 1_000_000.0,
+        "peak_cpu_util": 0.5,
+        "peak_memory_util": 0.5,
+        "bottleneck": "BALANCED",
+        "headroom_cpu": 0.5,
+        "headroom_memory": 0.5,
+        "cfi": 0.05,
+        "pressure_p95": 0.5,
+        "pressure_max": 0.5,
+        "ha_fully_covered": True,
+        "ha_deficit_cpu": 0.0,
+        "ha_deficit_memory": 0.0,
+    }
+    defaults.update(overrides)
+    return PlanSummary(**defaults)  # type: ignore[arg-type]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -159,6 +196,52 @@ class TestDetermineBottleneck:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# compute_vmware_summary tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestComputeVMwareSummary:
+    """Tests for VMware environment summary computation."""
+
+    def test_returns_none_with_no_hosts(self) -> None:
+        result = compute_vmware_summary(hosts=[], raw_vms=[])
+        assert result is None
+
+    def test_basic_summary(self) -> None:
+        hosts = [
+            RawHost(name="h1", sockets=2, cores_per_socket=8, ht_active=True, memory_mb=131072),
+            RawHost(name="h2", sockets=2, cores_per_socket=8, ht_active=False, memory_mb=65536),
+        ]
+        vms = [
+            RawVM(name="vm1", cpu=4, memory_mb=8192),
+            RawVM(name="vm2", cpu=8, memory_mb=16384),
+        ]
+        result = compute_vmware_summary(hosts=hosts, raw_vms=vms)
+
+        assert result is not None
+        assert result.host_count == 2
+        assert result.total_physical_cores == 32  # 2*8 + 2*8
+        assert result.total_logical_cpus == 48  # 2*8*2 + 2*8*1 = 32+16
+        assert result.total_ram_gb == pytest.approx((131072 + 65536) / 1024.0)
+        assert result.vm_count == 2
+        assert result.total_vcpu == 12
+        assert result.total_vmem_gb == pytest.approx((8192 + 16384) / 1024.0)
+        assert result.cpu_overcommit == pytest.approx(12 / 48.0)
+        assert result.mem_ratio == pytest.approx(24.0 / 192.0)
+
+    def test_no_vms(self) -> None:
+        hosts = [
+            RawHost(name="h1", sockets=2, cores_per_socket=16, ht_active=True, memory_mb=524288)
+        ]
+        result = compute_vmware_summary(hosts=hosts, raw_vms=[])
+
+        assert result is not None
+        assert result.vm_count == 0
+        assert result.total_vcpu == 0
+        assert result.cpu_overcommit == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # compute_summary integration tests
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -214,6 +297,37 @@ class TestComputeSummary:
         assert summary.cluster_memory_util == pytest.approx(0.375)
         assert summary.bottleneck == "BALANCED"
 
+    def test_capacity_fields(self) -> None:
+        """Total capacity fields are populated."""
+        n1 = _make_node("n1", cpu_total=100.0, memory_total=200_000.0)
+        n2 = _make_node("n2", cpu_total=80.0, memory_total=300_000.0)
+
+        state = ClusterState([n1, n2])
+        summary = compute_summary(state=state, vms=[], unplaced=[])
+
+        assert summary.total_cpu_capacity == pytest.approx(180.0)
+        assert summary.total_memory_capacity_mb == pytest.approx(500_000.0)
+
+    def test_node_details_populated(self) -> None:
+        """Node details include per-node breakdown."""
+        n1 = _make_node("n1", cpu_total=100.0, memory_total=100_000.0, is_inventory=True)
+        vm1 = _make_vm("vm1", cpu=30.0, memory_mb=40_000.0)
+        vm2 = _make_vm("vm2", cpu=20.0, memory_mb=20_000.0)
+
+        state = ClusterState([n1])
+        state.place(vm1, n1)
+        state.place(vm2, n1)
+
+        summary = compute_summary(state=state, vms=[vm1, vm2], unplaced=[])
+
+        assert len(summary.node_details) == 1
+        detail = summary.node_details[0]
+        assert detail.node_id == "n1"
+        assert detail.vm_count == 2
+        assert detail.cpu_util == pytest.approx(0.5)
+        assert detail.memory_util == pytest.approx(0.6)
+        assert detail.is_inventory is True
+
     def test_peak_utilization(self) -> None:
         """Peak is per-node max, not the cluster average."""
         n1 = _make_node("n1", cpu_total=100.0, memory_total=100_000.0)
@@ -268,6 +382,8 @@ class TestComputeSummary:
         assert summary.pressure_p95 == 0.0
         assert summary.pressure_max == 0.0
         assert summary.bottleneck == "BALANCED"
+        assert summary.total_cpu_capacity == 0.0
+        assert summary.total_memory_capacity_mb == 0.0
 
     def test_headroom_calculation(self) -> None:
         """Headroom = 1 - cluster utilization."""
@@ -305,7 +421,7 @@ class TestComputeSummary:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Render smoke test
+# Render smoke tests
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -314,11 +430,10 @@ class TestRenderSummary:
 
     def test_render_basic(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Rendering a basic summary should print without errors."""
-        summary = PlanSummary(
+        summary = _plan_summary(
             total_nodes=3,
             inventory_nodes=2,
             catalog_nodes=1,
-            ha_nodes=0,
             total_vms=10,
             placed_vms=9,
             unplaced_vms=1,
@@ -332,68 +447,26 @@ class TestRenderSummary:
             cfi=0.12,
             pressure_p95=0.85,
             pressure_max=0.91,
-            ha_fully_covered=True,
-            ha_deficit_cpu=0.0,
-            ha_deficit_memory=0.0,
             unplaced_vm_names=["monster-vm"],
         )
         render_summary(summary)
         captured = capsys.readouterr()
-        assert "Cluster Plan Summary" in captured.out
+        assert "OCP Virt Cluster Plan" in captured.out
         assert "MEMORY" in captured.out
         assert "monster-vm" in captured.out
 
     def test_render_no_unplaced(self, capsys: pytest.CaptureFixture[str]) -> None:
         """No unplaced VMs → no red warnings."""
-        summary = PlanSummary(
-            total_nodes=2,
-            inventory_nodes=2,
-            catalog_nodes=0,
-            ha_nodes=0,
-            total_vms=5,
-            placed_vms=5,
-            unplaced_vms=0,
-            cluster_cpu_util=0.5,
-            cluster_memory_util=0.5,
-            peak_cpu_util=0.5,
-            peak_memory_util=0.5,
-            bottleneck="BALANCED",
-            headroom_cpu=0.5,
-            headroom_memory=0.5,
-            cfi=0.05,
-            pressure_p95=0.5,
-            pressure_max=0.5,
-            ha_fully_covered=True,
-            ha_deficit_cpu=0.0,
-            ha_deficit_memory=0.0,
-        )
+        summary = _plan_summary()
         render_summary(summary)
         captured = capsys.readouterr()
         assert "Unplaced VMs: 0" in captured.out
 
     def test_render_shutdown_candidates(self, capsys: pytest.CaptureFixture[str]) -> None:
         """Shutdown candidates are displayed when > 0."""
-        summary = PlanSummary(
+        summary = _plan_summary(
             total_nodes=3,
             inventory_nodes=3,
-            catalog_nodes=0,
-            ha_nodes=0,
-            total_vms=5,
-            placed_vms=5,
-            unplaced_vms=0,
-            cluster_cpu_util=0.5,
-            cluster_memory_util=0.5,
-            peak_cpu_util=0.5,
-            peak_memory_util=0.5,
-            bottleneck="BALANCED",
-            headroom_cpu=0.5,
-            headroom_memory=0.5,
-            cfi=0.01,
-            pressure_p95=0.5,
-            pressure_max=0.5,
-            ha_fully_covered=True,
-            ha_deficit_cpu=0.0,
-            ha_deficit_memory=0.0,
             shutdown_candidates=7,
         )
         render_summary(summary)
@@ -403,24 +476,13 @@ class TestRenderSummary:
 
     def test_render_ha_deficit(self, capsys: pytest.CaptureFixture[str]) -> None:
         """HA deficit triggers a warning panel."""
-        summary = PlanSummary(
+        summary = _plan_summary(
             total_nodes=1,
             inventory_nodes=1,
-            catalog_nodes=0,
-            ha_nodes=0,
-            total_vms=1,
-            placed_vms=1,
-            unplaced_vms=0,
             cluster_cpu_util=0.9,
             cluster_memory_util=0.9,
             peak_cpu_util=0.9,
             peak_memory_util=0.9,
-            bottleneck="BALANCED",
-            headroom_cpu=0.1,
-            headroom_memory=0.1,
-            cfi=0.01,
-            pressure_p95=0.9,
-            pressure_max=0.9,
             ha_fully_covered=False,
             ha_deficit_cpu=20.0,
             ha_deficit_memory=10000.0,
@@ -428,3 +490,136 @@ class TestRenderSummary:
         render_summary(summary)
         captured = capsys.readouterr()
         assert "HA" in captured.out
+
+    def test_render_with_vmware_summary(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """VMware summary + comparison render when vmware data is provided."""
+        vmware = VMwareSummary(
+            host_count=13,
+            total_physical_cores=312,
+            total_logical_cpus=624,
+            total_ram_gb=6656.0,
+            vm_count=452,
+            total_vcpu=1747,
+            total_vmem_gb=6282.0,
+            cpu_overcommit=2.8,
+            mem_ratio=0.94,
+        )
+        summary = _plan_summary(total_nodes=9, inventory_nodes=9)
+        render_summary(summary, vmware=vmware)
+        captured = capsys.readouterr()
+        assert "VMware Source Environment" in captured.out
+        assert "OCP Virt Cluster Plan" in captured.out
+        assert "Migration Comparison" in captured.out
+        assert "Physical Hosts: 13" in captured.out
+        assert "VMs to Migrate: 452" in captured.out
+
+    def test_render_node_table(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """Node utilization table renders per-node details."""
+        details = [
+            NodeDetail(
+                node_id="h1",
+                profile="r740",
+                cpu_total=100.0,
+                cpu_used=60.0,
+                cpu_util=0.6,
+                memory_total_gb=500.0,
+                memory_used_gb=400.0,
+                memory_util=0.8,
+                vm_count=25,
+                is_inventory=True,
+            ),
+            NodeDetail(
+                node_id="h2",
+                profile="r760",
+                cpu_total=80.0,
+                cpu_used=70.0,
+                cpu_util=0.875,
+                memory_total_gb=256.0,
+                memory_used_gb=250.0,
+                memory_util=0.977,
+                vm_count=15,
+                is_inventory=False,
+            ),
+        ]
+        summary = _plan_summary(node_details=details)
+        render_summary(summary)
+        captured = capsys.readouterr()
+        assert "Node Utilization" in captured.out
+        assert "h1" in captured.out
+        assert "h2" in captured.out
+
+    def test_render_comparison_standalone(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """render_comparison prints the comparison table."""
+        vmware = VMwareSummary(
+            host_count=10,
+            total_physical_cores=200,
+            total_logical_cpus=400,
+            total_ram_gb=5120.0,
+            vm_count=300,
+            total_vcpu=900,
+            total_vmem_gb=4000.0,
+            cpu_overcommit=2.25,
+            mem_ratio=0.78,
+        )
+        plan = _plan_summary(
+            total_nodes=8,
+            total_cpu_capacity=350.0,
+            total_memory_capacity_mb=4_500_000.0,
+        )
+        render_comparison(vmware, plan)
+        captured = capsys.readouterr()
+        assert "Migration Comparison" in captured.out
+        assert "Active Nodes" in captured.out
+        assert "Why capacity differs" in captured.out
+
+
+class TestRenderVMwareSummary:
+    """Smoke tests for render_vmware_summary."""
+
+    def test_render_vmware_summary(self, capsys: pytest.CaptureFixture[str]) -> None:
+        vmware = VMwareSummary(
+            host_count=5,
+            total_physical_cores=80,
+            total_logical_cpus=160,
+            total_ram_gb=2560.0,
+            vm_count=100,
+            total_vcpu=400,
+            total_vmem_gb=2000.0,
+            cpu_overcommit=2.5,
+            mem_ratio=0.78,
+        )
+        render_vmware_summary(vmware)
+        captured = capsys.readouterr()
+        assert "VMware Source Environment" in captured.out
+        assert "Physical Hosts: 5" in captured.out
+        assert "2.5:1" in captured.out
+
+
+class TestRenderNodeTable:
+    """Smoke tests for render_node_table."""
+
+    def test_empty_list_no_output(self, capsys: pytest.CaptureFixture[str]) -> None:
+        render_node_table([])
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_renders_nodes(self, capsys: pytest.CaptureFixture[str]) -> None:
+        details = [
+            NodeDetail(
+                node_id="n1",
+                profile="r740",
+                cpu_total=100.0,
+                cpu_used=50.0,
+                cpu_util=0.5,
+                memory_total_gb=500.0,
+                memory_used_gb=250.0,
+                memory_util=0.5,
+                vm_count=10,
+                is_inventory=True,
+            ),
+        ]
+        render_node_table(details)
+        captured = capsys.readouterr()
+        assert "Node Utilization" in captured.out
+        assert "n1" in captured.out
+        assert "inv" in captured.out

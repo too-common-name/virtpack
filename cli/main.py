@@ -46,10 +46,14 @@ _console = Console(stderr=True)
 def _build_autodiscovery_nodes(
     rvtools_path: Path,
     config: PlanConfig,
-) -> list[Node]:
+) -> tuple[list[Node], list[RawHost]]:
     """Build inventory nodes from the RVTools ``vHost`` sheet.
 
-    Returns an empty list if the sheet cannot be parsed (non-fatal).
+    Returns
+    -------
+    tuple[list[Node], list[RawHost]]
+        (normalized inventory nodes, raw hosts for VMware summary).
+        Both lists are empty if the sheet cannot be parsed (non-fatal).
     """
     from core.normalizer import normalize_node_capacity
     from loaders.rvtools_parser import RVToolsParseError, parse_vhost
@@ -60,10 +64,10 @@ def _build_autodiscovery_nodes(
         hosts = parse_vhost(rvtools_path)
     except RVToolsParseError as exc:
         _console.print(f"[yellow]⚠ vHost auto-discovery skipped:[/yellow] {exc}")
-        return []
+        return [], []
 
     if not hosts:
-        return []
+        return [], []
 
     nodes: list[Node] = []
     for host in hosts:
@@ -87,7 +91,7 @@ def _build_autodiscovery_nodes(
                 id_override=host.name,
             )
         )
-    return nodes
+    return nodes, hosts
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -156,7 +160,7 @@ def plan(
         load_plan_config,
     )
     from report.csv_exporter import export_placement_csv
-    from report.terminal_summary import compute_summary, render_summary
+    from report.terminal_summary import compute_summary, compute_vmware_summary, render_summary
 
     out = Console()
 
@@ -216,8 +220,9 @@ def plan(
     inv_nodes = build_inventory_nodes(inventory_config, plan_config)
 
     # vHost auto-discovery (unless disabled)
+    discovered_hosts: list[RawHost] = []
     if not no_auto_discovery:
-        auto_nodes = _build_autodiscovery_nodes(rvtools, plan_config)
+        auto_nodes, discovered_hosts = _build_autodiscovery_nodes(rvtools, plan_config)
         inv_nodes.extend(auto_nodes)
         if debug and auto_nodes:
             out.print(f"[dim]Auto-discovered {len(auto_nodes)} hosts from vHost[/dim]")
@@ -289,6 +294,9 @@ def plan(
     if debug:
         out.print(f"[dim]Wrote {rows_written} rows to {csv_path}[/dim]")
 
+    # VMware source summary (available when vHost was auto-discovered)
+    vmware_summary = compute_vmware_summary(hosts=discovered_hosts, raw_vms=raw_vms)
+
     # Terminal summary
     summary = compute_summary(
         state=state,
@@ -297,7 +305,7 @@ def plan(
         ha_result=ha_result,
         unused_inventory=result.unused_inventory if result.unused_inventory else None,
     )
-    render_summary(summary)
+    render_summary(summary, vmware=vmware_summary)
 
     out.print(f"\n[bold green]✓[/bold green] Placement map saved to [bold]{csv_path}[/bold]")
 

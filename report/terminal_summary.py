@@ -6,9 +6,11 @@ rendering and logic strictly decoupled.
 
 Key metrics:
 
+* **VMware Source Environment** — hosts, capacity, VM demand, overcommit.
 * **Cluster Plan Summary** (§8.1) — node counts, utilization, bottleneck.
-* **Cluster Fragmentation Index** (§8.2) — average stranded capacity penalty.
-* **Node Pressure Index** (§8.3) — P95 and max pressure.
+* **Node Utilization** — per-node CPU/MEM breakdown.
+* **Engineering Metrics** (§8.2, §8.3) — CFI and node pressure.
+* **Migration Comparison** — VMware vs OCP Virt side-by-side.
 """
 
 from __future__ import annotations
@@ -22,12 +24,62 @@ from algorithms.scorer import fragmentation_penalty
 if TYPE_CHECKING:
     from core.cluster_state import ClusterState
     from core.ha_injector import HAResult
+    from loaders.rvtools_parser import RawHost, RawVM
     from models.node import Node
     from models.vm import VM
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Summary data container
+# VMware source environment summary
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class VMwareSummary:
+    """Pre-migration metrics from the RVTools VMware export.
+
+    Constructed by :func:`compute_vmware_summary` from raw parsed data.
+    """
+
+    # Physical hosts
+    host_count: int
+    total_physical_cores: int  # Σ(sockets × cores_per_socket)
+    total_logical_cpus: int  # with HT (threads)
+    total_ram_gb: float  # Σ(memory_mb / 1024)
+
+    # VM workload (post-filter: powered on, no templates/SRM)
+    vm_count: int
+    total_vcpu: int  # Σ(vm.cpu)
+    total_vmem_gb: float  # Σ(vm.memory_mb / 1024)
+
+    # Computed ratios
+    cpu_overcommit: float  # total_vcpu / total_logical_cpus
+    mem_ratio: float  # total_vmem_gb / total_ram_gb
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OCP Virt per-node detail
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class NodeDetail:
+    """Per-node utilization detail for the node table."""
+
+    node_id: str
+    profile: str
+    cpu_total: float
+    cpu_used: float
+    cpu_util: float
+    memory_total_gb: float
+    memory_used_gb: float
+    memory_util: float
+    vm_count: int
+    is_inventory: bool
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OCP Virt plan summary
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -54,6 +106,10 @@ class PlanSummary:
     cluster_cpu_util: float  # ∈ [0, 1]
     cluster_memory_util: float  # ∈ [0, 1]
 
+    # Cluster-wide absolute capacity
+    total_cpu_capacity: float  # sum of cpu_total across all nodes
+    total_memory_capacity_mb: float  # sum of memory_total across all nodes
+
     # Per-node peak
     peak_cpu_util: float  # max node cpu_util
     peak_memory_util: float  # max node memory_util
@@ -77,6 +133,9 @@ class PlanSummary:
 
     # Consolidation — nodes that can be powered off (HLD §1.1 Scenario A2)
     shutdown_candidates: int = 0
+
+    # Per-node breakdown
+    node_details: list[NodeDetail] = field(default_factory=list)
 
     # Unplaced VM names (for detail section)
     unplaced_vm_names: list[str] = field(default_factory=list)
@@ -124,7 +183,50 @@ def _determine_bottleneck(cpu_util: float, mem_util: float) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Summary builder
+# VMware summary builder
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def compute_vmware_summary(
+    *,
+    hosts: list[RawHost],
+    raw_vms: list[RawVM],
+) -> VMwareSummary | None:
+    """Build a VMware environment summary from raw RVTools data.
+
+    Returns ``None`` if no hosts are available (e.g. --no-auto-discovery).
+    """
+    if not hosts:
+        return None
+
+    total_physical_cores = sum(h.sockets * h.cores_per_socket for h in hosts)
+    total_logical_cpus = sum(
+        h.sockets * h.cores_per_socket * (2 if h.ht_active else 1) for h in hosts
+    )
+    total_ram_gb = sum(h.memory_mb for h in hosts) / 1024.0
+
+    vm_count = len(raw_vms)
+    total_vcpu = sum(v.cpu for v in raw_vms)
+    total_vmem_gb = sum(v.memory_mb for v in raw_vms) / 1024.0
+
+    cpu_overcommit = total_vcpu / total_logical_cpus if total_logical_cpus > 0 else 0.0
+    mem_ratio = total_vmem_gb / total_ram_gb if total_ram_gb > 0 else 0.0
+
+    return VMwareSummary(
+        host_count=len(hosts),
+        total_physical_cores=total_physical_cores,
+        total_logical_cpus=total_logical_cpus,
+        total_ram_gb=total_ram_gb,
+        vm_count=vm_count,
+        total_vcpu=total_vcpu,
+        total_vmem_gb=total_vmem_gb,
+        cpu_overcommit=cpu_overcommit,
+        mem_ratio=mem_ratio,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# OCP Virt plan summary builder
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -153,6 +255,7 @@ def compute_summary(
         ``None`` or empty in spread mode.
     """
     nodes = state.nodes
+    node_vm_map = state.node_vm_map
     ha_nodes_count = len(ha_result.nodes_added) if ha_result else 0
 
     # ── Node counts ───────────────────────────────────────────────
@@ -193,6 +296,27 @@ def compute_summary(
     # ── Consolidation ─────────────────────────────────────────────
     shutdown = len(unused_inventory) if unused_inventory else 0
 
+    # ── Per-node details ──────────────────────────────────────────
+    details: list[NodeDetail] = []
+    for n in nodes:
+        vm_names = node_vm_map.get(n.id, [])
+        details.append(
+            NodeDetail(
+                node_id=n.id,
+                profile=n.profile,
+                cpu_total=n.cpu_total,
+                cpu_used=n.cpu_used,
+                cpu_util=n.cpu_util,
+                memory_total_gb=n.memory_total / 1024.0,
+                memory_used_gb=n.memory_used / 1024.0,
+                memory_util=n.memory_util,
+                vm_count=len(vm_names),
+                is_inventory=n.is_inventory,
+            )
+        )
+    # Sort by VM count descending (busiest first)
+    details.sort(key=lambda d: d.vm_count, reverse=True)
+
     return PlanSummary(
         total_nodes=total_nodes,
         inventory_nodes=inventory_count,
@@ -203,6 +327,8 @@ def compute_summary(
         unplaced_vms=unplaced_vms,
         cluster_cpu_util=cluster_cpu_util,
         cluster_memory_util=cluster_mem_util,
+        total_cpu_capacity=total_cpu_cap,
+        total_memory_capacity_mb=total_mem_cap,
         peak_cpu_util=peak_cpu,
         peak_memory_util=peak_mem,
         bottleneck=_determine_bottleneck(cluster_cpu_util, cluster_mem_util),
@@ -215,6 +341,7 @@ def compute_summary(
         ha_deficit_cpu=ha_def_cpu,
         ha_deficit_memory=ha_def_mem,
         shutdown_candidates=shutdown,
+        node_details=details,
         unplaced_vm_names=[vm.name for vm in unplaced],
     )
 
@@ -224,10 +351,181 @@ def compute_summary(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def render_summary(summary: PlanSummary) -> None:
-    """Print the cluster plan summary to the terminal using Rich.
+def render_vmware_summary(vmware: VMwareSummary) -> None:
+    """Print the VMware source environment summary panel."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
 
-    Layout matches HLD §8.1.
+    console = Console()
+    lines = Text()
+
+    lines.append(f"Physical Hosts: {vmware.host_count}\n", style="bold")
+    lines.append(
+        f"Total Physical Cores: {vmware.total_physical_cores}"
+        f"  ({vmware.total_logical_cpus} logical w/ HT)\n"
+    )
+    lines.append(f"Total RAM: {vmware.total_ram_gb:,.0f} GB\n\n")
+
+    lines.append(f"VMs to Migrate: {vmware.vm_count}\n", style="bold")
+    lines.append(f"Total vCPU Demand: {vmware.total_vcpu:,}\n")
+    lines.append(f"Total Memory Demand: {vmware.total_vmem_gb:,.0f} GB\n\n")
+
+    lines.append(f"VMware vCPU:pCPU Ratio: {vmware.cpu_overcommit:.1f}:1\n")
+    lines.append(f"VMware vMEM:pMEM Ratio: {vmware.mem_ratio:.2f}:1")
+
+    console.print(
+        Panel(
+            lines,
+            title="[bold]VMware Source Environment[/bold]",
+            border_style="yellow",
+            width=55,
+        )
+    )
+
+
+def render_node_table(details: list[NodeDetail]) -> None:
+    """Print per-node utilization as a Rich table."""
+    from rich.console import Console
+    from rich.table import Table
+
+    if not details:
+        return
+
+    console = Console()
+    table = Table(
+        title="Node Utilization",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Node", style="bold")
+    table.add_column("Profile")
+    table.add_column("VMs", justify="right")
+    table.add_column("CPU Used", justify="right")
+    table.add_column("CPU %", justify="right")
+    table.add_column("MEM Used", justify="right")
+    table.add_column("MEM %", justify="right")
+    table.add_column("Type", justify="center")
+
+    for d in details:
+        cpu_style = "red" if d.cpu_util > 0.85 else ""
+        mem_style = "red" if d.memory_util > 0.85 else ""
+        node_type = "inv" if d.is_inventory else "cat"
+
+        table.add_row(
+            d.node_id,
+            d.profile,
+            str(d.vm_count),
+            f"{d.cpu_used:.1f}/{d.cpu_total:.0f}",
+            f"[{cpu_style}]{d.cpu_util:.0%}[/{cpu_style}]" if cpu_style else f"{d.cpu_util:.0%}",
+            f"{d.memory_used_gb:.0f}/{d.memory_total_gb:.0f} GB",
+            f"[{mem_style}]{d.memory_util:.0%}[/{mem_style}]"
+            if mem_style
+            else f"{d.memory_util:.0%}",
+            node_type,
+        )
+
+    console.print(table)
+
+
+def render_comparison(vmware: VMwareSummary, plan: PlanSummary) -> None:
+    """Print the VMware → OCP Virt migration comparison table."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    console = Console()
+
+    table = Table(
+        title="Migration Comparison: VMware → OCP Virt",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Metric", style="bold")
+    table.add_column("VMware", justify="right")
+    table.add_column("OCP Virt", justify="right")
+    table.add_column("Delta", justify="right")
+
+    # Active nodes
+    ocp_nodes = plan.total_nodes
+    node_delta = ocp_nodes - vmware.host_count
+    node_delta_str = f"{node_delta:+d}" if node_delta != 0 else "—"
+    table.add_row(
+        "Active Nodes",
+        str(vmware.host_count),
+        str(ocp_nodes),
+        node_delta_str,
+    )
+
+    # CPU capacity
+    ocp_cpu = plan.total_cpu_capacity
+    cpu_delta = ocp_cpu - vmware.total_logical_cpus
+    cpu_pct = cpu_delta / vmware.total_logical_cpus * 100 if vmware.total_logical_cpus else 0
+    table.add_row(
+        "CPU Capacity (cores)",
+        f"{vmware.total_logical_cpus:,} logical",
+        f"{ocp_cpu:,.0f} usable",
+        f"{cpu_delta:+,.0f} ({cpu_pct:+.0f}%)",
+    )
+
+    # Memory capacity
+    ocp_mem_gb = plan.total_memory_capacity_mb / 1024.0
+    mem_delta = ocp_mem_gb - vmware.total_ram_gb
+    mem_pct = mem_delta / vmware.total_ram_gb * 100 if vmware.total_ram_gb else 0
+    table.add_row(
+        "Memory Capacity (GB)",
+        f"{vmware.total_ram_gb:,.0f} raw",
+        f"{ocp_mem_gb:,.0f} usable",
+        f"{mem_delta:+,.0f} ({mem_pct:+.0f}%)",
+    )
+
+    # vCPU demand
+    table.add_row(
+        "vCPU Demand",
+        f"{vmware.total_vcpu:,} vCPUs",
+        "(normalized by overcommit)",
+        "",
+    )
+
+    # Memory demand (same in both — 1:1)
+    table.add_row(
+        "Memory Demand (GB)",
+        f"{vmware.total_vmem_gb:,.0f}",
+        f"{vmware.total_vmem_gb:,.0f} (1:1)",
+        "—",
+    )
+
+    console.print(table)
+
+    # Explanatory note
+    console.print(
+        Panel(
+            "[dim]OCP Virt usable capacity is lower because:[/dim]\n"
+            "  • HT efficiency: 2 threads ≠ 2 cores (1.5x factor)\n"
+            "  • System overheads: kubelet + OCP Virt operator reserved\n"
+            "  • No memory overcommit: 1:1 reservation (VMware uses TPS/ballooning)\n"
+            "  • Safety margins: utilization targets reserve headroom",
+            title="[dim]ⓘ  Why capacity differs[/dim]",
+            border_style="dim",
+            width=62,
+        )
+    )
+
+
+def render_summary(
+    summary: PlanSummary,
+    vmware: VMwareSummary | None = None,
+) -> None:
+    """Print the full report to the terminal using Rich.
+
+    Renders (in order):
+    1. VMware source environment (if available)
+    2. OCP Virt cluster plan summary
+    3. Node utilization table
+    4. Engineering metrics
+    5. Migration comparison (if VMware data available)
+    6. HA warnings
+    7. Unplaced VM details
     """
     from rich.console import Console
     from rich.panel import Panel
@@ -236,7 +534,12 @@ def render_summary(summary: PlanSummary) -> None:
 
     console = Console()
 
-    # ── Main summary panel ────────────────────────────────────────
+    # ── 1. VMware source environment ──────────────────────────────
+    if vmware is not None:
+        render_vmware_summary(vmware)
+        console.print()
+
+    # ── 2. Main summary panel ─────────────────────────────────────
     lines = Text()
 
     # Node breakdown
@@ -288,10 +591,14 @@ def render_summary(summary: PlanSummary) -> None:
         lines.append("Unplaced VMs: 0", style="bold green")
 
     console.print(
-        Panel(lines, title="[bold]Cluster Plan Summary[/bold]", border_style="blue", width=50)
+        Panel(lines, title="[bold]OCP Virt Cluster Plan[/bold]", border_style="blue", width=55)
     )
 
-    # ── Engineering metrics table ─────────────────────────────────
+    # ── 3. Node utilization table ─────────────────────────────────
+    if summary.node_details:
+        render_node_table(summary.node_details)
+
+    # ── 4. Engineering metrics table ──────────────────────────────
     eng_table = Table(title="Engineering Metrics", show_header=True, header_style="bold cyan")
     eng_table.add_column("Metric", style="bold")
     eng_table.add_column("Value", justify="right")
@@ -304,7 +611,11 @@ def render_summary(summary: PlanSummary) -> None:
 
     console.print(eng_table)
 
-    # ── HA status ─────────────────────────────────────────────────
+    # ── 5. Migration comparison ───────────────────────────────────
+    if vmware is not None:
+        render_comparison(vmware, summary)
+
+    # ── 6. HA status ──────────────────────────────────────────────
     if not summary.ha_fully_covered:
         console.print(
             Panel(
@@ -313,11 +624,11 @@ def render_summary(summary: PlanSummary) -> None:
                 f"  Memory: {summary.ha_deficit_memory:.0f} MB uncovered",
                 title="[bold red]⚠ HA Warning[/bold red]",
                 border_style="red",
-                width=50,
+                width=55,
             )
         )
 
-    # ── Unplaced detail ───────────────────────────────────────────
+    # ── 7. Unplaced detail ────────────────────────────────────────
     if summary.unplaced_vm_names:
         unplaced_text = "\n".join(f"  • {name}" for name in summary.unplaced_vm_names[:20])
         if len(summary.unplaced_vm_names) > 20:
@@ -327,6 +638,6 @@ def render_summary(summary: PlanSummary) -> None:
                 unplaced_text,
                 title=f"[bold red]Unplaced VMs ({summary.unplaced_vms})[/bold red]",
                 border_style="red",
-                width=50,
+                width=55,
             )
         )

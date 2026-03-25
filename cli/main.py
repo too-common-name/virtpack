@@ -271,17 +271,18 @@ def plan(
         typer.Option("--output", help="Output directory for placement_map.csv"),
     ] = Path("./out"),
     strategy: Annotated[
-        PlacementStrategy,
+        PlacementStrategy | None,
         typer.Option(
             "--strategy",
             help=(
                 "Placement strategy: 'spread' distributes VMs across all "
                 "inventory nodes; 'consolidate' packs VMs tightly and "
-                "reports nodes that can be powered off."
+                "reports nodes that can be powered off. "
+                "Overrides config.yaml placement_strategy if set."
             ),
             case_sensitive=False,
         ),
-    ] = PlacementStrategy.SPREAD,
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option("--debug", help="Verbose placement logs"),
@@ -322,8 +323,8 @@ def plan(
         _console.print(f"[red]Error loading config:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    # CLI --strategy overrides config.yaml placement_strategy
-    effective_strategy = strategy
+    # CLI --strategy overrides config.yaml; if neither is set, default to SPREAD
+    effective_strategy = strategy if strategy is not None else plan_config.placement_strategy
 
     try:
         inventory_config = load_inventory_config(inventory_path)

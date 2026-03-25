@@ -130,6 +130,7 @@ class PlanSummary:
     ha_fully_covered: bool
     ha_deficit_cpu: float
     ha_deficit_memory: float
+    ha_nodes_reclaimed: int = 0  # inventory nodes reclaimed from shutdown pool
 
     # Consolidation — nodes that can be powered off (HLD §1.1 Scenario A2)
     shutdown_candidates: int = 0
@@ -292,6 +293,7 @@ def compute_summary(
     ha_covered = ha_result.fully_covered if ha_result else True
     ha_def_cpu = ha_result.deficit_cpu if ha_result else 0.0
     ha_def_mem = ha_result.deficit_memory if ha_result else 0.0
+    ha_reclaimed = len(ha_result.nodes_reclaimed) if ha_result else 0
 
     # ── Consolidation ─────────────────────────────────────────────
     shutdown = len(unused_inventory) if unused_inventory else 0
@@ -340,6 +342,7 @@ def compute_summary(
         ha_fully_covered=ha_covered,
         ha_deficit_cpu=ha_def_cpu,
         ha_deficit_memory=ha_def_mem,
+        ha_nodes_reclaimed=ha_reclaimed,
         shutdown_candidates=shutdown,
         node_details=details,
         unplaced_vm_names=[vm.name for vm in unplaced],
@@ -616,17 +619,39 @@ def render_summary(
         render_comparison(vmware, summary)
 
     # ── 6. HA status ──────────────────────────────────────────────
-    if not summary.ha_fully_covered:
-        console.print(
-            Panel(
+    if summary.ha_nodes_reclaimed > 0 or summary.ha_nodes > 0 or not summary.ha_fully_covered:
+        ha_lines = ""
+        if summary.ha_nodes_reclaimed > 0:
+            ha_lines += (
+                f"[green]Reclaimed {summary.ha_nodes_reclaimed} inventory node(s) "
+                f"from shutdown pool for HA spare capacity[/green]\n"
+            )
+        if summary.ha_nodes > 0:
+            ha_lines += f"Added {summary.ha_nodes} catalog HA spare node(s)\n"
+        if summary.ha_fully_covered:
+            ha_lines += "[bold green]HA requirement: SATISFIED[/bold green]"
+            console.print(
+                Panel(
+                    ha_lines.strip(),
+                    title="[bold green]✓ HA Status[/bold green]",
+                    border_style="green",
+                    width=55,
+                )
+            )
+        else:
+            ha_lines += (
                 f"[bold red]HA DEFICIT[/bold red]\n"
                 f"  CPU:    {summary.ha_deficit_cpu:.1f} cores uncovered\n"
-                f"  Memory: {summary.ha_deficit_memory:.0f} MB uncovered",
-                title="[bold red]⚠ HA Warning[/bold red]",
-                border_style="red",
-                width=55,
+                f"  Memory: {summary.ha_deficit_memory:.0f} MB uncovered"
             )
-        )
+            console.print(
+                Panel(
+                    ha_lines.strip(),
+                    title="[bold red]⚠ HA Warning[/bold red]",
+                    border_style="red",
+                    width=55,
+                )
+            )
 
     # ── 7. Unplaced detail ────────────────────────────────────────
     if summary.unplaced_vm_names:

@@ -281,7 +281,7 @@ class TestInjectHANodes:
         assert len(state.nodes) == initial_count + len(result.nodes_added)
 
     def test_no_catalog_reports_deficit(self) -> None:
-        """No catalog → deficit is reported, no nodes added."""
+        """No catalog and no unused pool → deficit is reported, no nodes added."""
         n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
         state = ClusterState([n1])
         state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
@@ -292,6 +292,7 @@ class TestInjectHANodes:
             catalog=None,
         )
         assert result.nodes_added == []
+        assert result.nodes_reclaimed == []
         assert result.fully_covered is False
         assert result.deficit_cpu > 0.0
         assert result.deficit_memory > 0.0
@@ -360,3 +361,139 @@ class TestInjectHANodes:
         )
         assert all(not n.is_inventory for n in result.nodes_added)
         assert all(n.cost_weight > 0 for n in result.nodes_added)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Unused pool reclamation (consolidate mode HA)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestUnusedPoolReclamation:
+    """HA should reclaim unused inventory nodes before buying catalog nodes."""
+
+    def test_reclaims_from_pool_covers_deficit(self) -> None:
+        """Unused pool has enough capacity → reclaim, no catalog needed."""
+        # Single active node, nearly full
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        # 2 unused nodes in the pool (could be shut down)
+        spare1 = _inv_node(index=10, cpu_total=100.0, memory_total=400_000.0)
+        spare2 = _inv_node(index=11, cpu_total=80.0, memory_total=300_000.0)
+        pool = [spare1, spare2]
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            catalog=None,  # no catalog!
+            unused_pool=pool,
+        )
+
+        assert result.fully_covered is True
+        assert result.nodes_added == []  # no catalog nodes
+        assert len(result.nodes_reclaimed) >= 1
+        # Pool should be mutated (reclaimed nodes removed)
+        assert len(pool) < 2
+
+    def test_reclaimed_nodes_added_to_state(self) -> None:
+        """Reclaimed nodes must appear in the cluster state."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        spare = _inv_node(index=10, cpu_total=100.0, memory_total=400_000.0)
+        pool = [spare]
+        initial_count = len(state.nodes)
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            unused_pool=pool,
+        )
+
+        assert result.fully_covered is True
+        assert len(state.nodes) == initial_count + len(result.nodes_reclaimed)
+        # The reclaimed node should be in the state
+        assert spare in state.nodes
+
+    def test_reclaims_largest_first(self) -> None:
+        """Reclamation should prefer the largest nodes to minimise count."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        # Small node won't cover the memory deficit alone
+        small = _inv_node(index=10, cpu_total=20.0, memory_total=50_000.0)
+        big = _inv_node(index=11, cpu_total=100.0, memory_total=400_000.0)
+        pool = [small, big]
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            unused_pool=pool,
+        )
+
+        assert result.fully_covered is True
+        # Big node should be reclaimed first
+        assert big in result.nodes_reclaimed
+
+    def test_pool_plus_catalog_hybrid(self) -> None:
+        """Pool partially covers → catalog fills the rest."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        # Small pool node — not enough on its own
+        small = _inv_node(index=10, cpu_total=10.0, memory_total=10_000.0)
+        pool = [small]
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            catalog=_catalog(),
+            unused_pool=pool,
+        )
+
+        assert result.fully_covered is True
+        assert len(result.nodes_reclaimed) == 1  # the small node
+        assert len(result.nodes_added) >= 1  # catalog fills the gap
+        assert pool == []  # pool fully drained
+
+    def test_empty_pool_falls_through_to_catalog(self) -> None:
+        """Empty unused pool → behaves like the original (catalog only)."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            catalog=_catalog(),
+            unused_pool=[],
+        )
+
+        assert result.fully_covered is True
+        assert result.nodes_reclaimed == []
+        assert len(result.nodes_added) >= 1
+
+    def test_pool_reduces_shutdown_candidates(self) -> None:
+        """After reclamation, the pool length == actual shutdown candidates."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        spare1 = _inv_node(index=10, cpu_total=100.0, memory_total=400_000.0)
+        spare2 = _inv_node(index=11, cpu_total=80.0, memory_total=300_000.0)
+        spare3 = _inv_node(index=12, cpu_total=60.0, memory_total=200_000.0)
+        pool = [spare1, spare2, spare3]
+
+        inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            unused_pool=pool,
+        )
+
+        # Some nodes reclaimed, remainder can be shut down
+        assert len(pool) < 3  # at least 1 reclaimed
+        assert len(pool) >= 0  # some may remain

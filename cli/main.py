@@ -421,14 +421,26 @@ def plan(
     # ══════════════════════════════════════════════════════════════════
     # 4. HA INJECTION
     # ══════════════════════════════════════════════════════════════════
+    # Pass unused_inventory so HA can reclaim idle nodes before buying
+    # new catalog hardware.  The list is mutated: reclaimed nodes are
+    # removed, so result.unused_inventory reflects true shutdown count.
     ha_result = inject_ha_nodes(
         state=state,
         config=plan_config,
         catalog=catalog_config,
+        unused_pool=result.unused_inventory if result.unused_inventory else None,
     )
 
-    if debug and ha_result.nodes_added:
-        out.print(f"[dim]HA injection: {len(ha_result.nodes_added)} spare nodes added[/dim]")
+    if debug:
+        if ha_result.nodes_reclaimed:
+            out.print(
+                f"[dim]HA reclaimed {len(ha_result.nodes_reclaimed)} "
+                f"inventory node(s) from shutdown pool[/dim]"
+            )
+        if ha_result.nodes_added:
+            out.print(
+                f"[dim]HA injection: {len(ha_result.nodes_added)} catalog spare nodes added[/dim]"
+            )
 
     # ══════════════════════════════════════════════════════════════════
     # 5. REPORTING

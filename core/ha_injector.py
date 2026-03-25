@@ -47,6 +47,7 @@ class HAResult:
     """Outcome of the HA injection phase."""
 
     nodes_added: list[Node] = field(default_factory=list)
+    nodes_reclaimed: list[Node] = field(default_factory=list)
     deficit_cpu: float = 0.0
     deficit_memory: float = 0.0
 
@@ -114,19 +115,24 @@ def inject_ha_nodes(
     state: ClusterState,
     config: PlanConfig,
     catalog: CatalogConfig | None = None,
+    unused_pool: list[Node] | None = None,
 ) -> HAResult:
-    """Add catalog nodes to satisfy the HA spare-capacity requirement.
+    """Ensure the cluster has enough spare capacity for HA.
 
     Algorithm:
 
     1. Compute worst-case spare needed for ``ha_failures_to_tolerate``.
     2. Compute current cluster spare.
-    3. If deficit exists and a catalog is available, greedily add
-       the cheapest catalog profile until both CPU and memory
-       deficits are covered.
+    3. If deficit exists:
 
-    HA nodes are added to ``state`` (via ``state.add_node``) and are
-    identifiable by their ``"ha-"`` ID prefix.
+       a. **Reclaim** unused inventory nodes from the shutdown pool
+          (largest memory first — free, already owned).
+       b. If still short and a catalog is available, greedily add
+          the cheapest catalog profile.
+
+    Reclaimed nodes are *removed* from ``unused_pool`` (mutated in place)
+    and added to ``state``.  This ensures ``len(unused_pool)`` after
+    the call equals the true number of nodes that can be powered off.
 
     Parameters
     ----------
@@ -135,13 +141,16 @@ def inject_ha_nodes(
     config : PlanConfig
         Global configuration (safety margins, overheads).
     catalog : CatalogConfig | None
-        Available catalog profiles.  ``None`` = inventory-only mode
-        (deficit is reported but no nodes are added).
+        Available catalog profiles.  ``None`` = inventory-only mode.
+    unused_pool : list[Node] | None
+        Inventory nodes not activated during consolidation.  The list
+        is **mutated** — reclaimed nodes are removed from it.
 
     Returns
     -------
     HAResult
-        Contains the list of added HA nodes and any remaining deficit.
+        Contains reclaimed inventory nodes, added catalog nodes, and
+        any remaining deficit.
     """
     n_failures = config.safety_margins.ha_failures_to_tolerate
     if n_failures <= 0:
@@ -157,14 +166,35 @@ def inject_ha_nodes(
     if deficit_cpu <= 0.0 and deficit_mem <= 0.0:
         return HAResult()
 
-    # No catalog → report deficit without adding nodes
+    # ── Phase 1: Reclaim unused inventory nodes (free) ────────────
+    nodes_reclaimed: list[Node] = []
+    if unused_pool:
+        # Sort pool by memory_total descending → biggest nodes first
+        # to minimise the number of nodes we need to reclaim.
+        pool_sorted = sorted(unused_pool, key=lambda n: n.memory_total, reverse=True)
+        for node in pool_sorted:
+            if deficit_cpu <= 0.0 and deficit_mem <= 0.0:
+                break
+            # Reclaim this node
+            unused_pool.remove(node)
+            state.add_node(node)
+            nodes_reclaimed.append(node)
+            deficit_cpu = max(0.0, deficit_cpu - node.cpu_total)
+            deficit_mem = max(0.0, deficit_mem - node.memory_total)
+
+    # Already covered after reclamation
+    if deficit_cpu <= 0.0 and deficit_mem <= 0.0:
+        return HAResult(nodes_reclaimed=nodes_reclaimed)
+
+    # ── Phase 2: Catalog expansion (if available) ─────────────────
     if catalog is None or not catalog.profiles:
-        return HAResult(deficit_cpu=deficit_cpu, deficit_memory=deficit_mem)
+        return HAResult(
+            nodes_reclaimed=nodes_reclaimed,
+            deficit_cpu=deficit_cpu,
+            deficit_memory=deficit_mem,
+        )
 
-    # Greedy: add cheapest catalog profile until both deficits are covered
-    # Sort profiles by cost_weight to always pick the cheapest option
     cheapest_profile = min(catalog.profiles, key=lambda p: p.cost_weight)
-
     nodes_added: list[Node] = []
     ha_counter = 0
 
@@ -176,7 +206,10 @@ def inject_ha_nodes(
         deficit_cpu = max(0.0, deficit_cpu - node.cpu_total)
         deficit_mem = max(0.0, deficit_mem - node.memory_total)
 
-    return HAResult(nodes_added=nodes_added, deficit_cpu=0.0, deficit_memory=0.0)
+    return HAResult(
+        nodes_added=nodes_added,
+        nodes_reclaimed=nodes_reclaimed,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════

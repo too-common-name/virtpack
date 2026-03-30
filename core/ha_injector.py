@@ -115,36 +115,41 @@ def _simulate_failure(
     surviving_nodes: list[Node],
     displaced_vms: list[VM],
 ) -> tuple[float, float]:
-    """Greedy first-fit re-placement of displaced VMs onto survivors.
+    """Greedy best-fit re-placement of displaced VMs onto survivors.
 
     For each VM (sorted by memory desc — standard packing order), try to
     find a surviving node with enough **co-located** spare capacity in
-    *both* CPU and memory.  VMs that cannot fit anywhere accumulate as
+    CPU, memory, *and* pods.  VMs that cannot fit anywhere accumulate as
     the unplaced deficit.
 
     Returns ``(unplaced_cpu, unplaced_mem)`` — the total resources of
     VMs that could not be rescheduled.  Pure function, no side effects.
     """
-    spare: dict[str, tuple[float, float]] = {
-        n.id: (n.cpu_remaining, n.memory_remaining) for n in surviving_nodes
+    spare: dict[str, tuple[float, float, int]] = {
+        n.id: (n.cpu_remaining, n.memory_remaining, n.pods_remaining) for n in surviving_nodes
     }
     unplaced_cpu = 0.0
     unplaced_mem = 0.0
 
     for vm in sorted(displaced_vms, key=lambda v: v.memory_mb, reverse=True):
         # Best-fit: among nodes with enough co-located capacity in
-        # BOTH dimensions, pick the one with the least spare memory
+        # ALL three dimensions, pick the one with the least spare memory
         # so large pockets of headroom are preserved for bigger VMs.
         best_id: str | None = None
         best_mem = float("inf")
         for node in surviving_nodes:
-            s_cpu, s_mem = spare[node.id]
-            if s_cpu >= vm.cpu and s_mem >= vm.memory_mb and s_mem < best_mem:
+            s_cpu, s_mem, s_pods = spare[node.id]
+            if (
+                s_cpu >= vm.cpu
+                and s_mem >= vm.memory_mb
+                and s_pods >= vm.pods
+                and s_mem < best_mem
+            ):
                 best_id = node.id
                 best_mem = s_mem
         if best_id is not None:
-            s_cpu, s_mem = spare[best_id]
-            spare[best_id] = (s_cpu - vm.cpu, s_mem - vm.memory_mb)
+            s_cpu, s_mem, s_pods = spare[best_id]
+            spare[best_id] = (s_cpu - vm.cpu, s_mem - vm.memory_mb, s_pods - vm.pods)
         else:
             unplaced_cpu += vm.cpu
             unplaced_mem += vm.memory_mb

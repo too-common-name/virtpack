@@ -270,6 +270,17 @@ class TestSimulateFailure:
         assert d_cpu == 2.0
         assert d_mem == 5_000.0
 
+    def test_pod_saturated_node_rejects_vm(self) -> None:
+        """CPU and memory free but pod limit reached → VM cannot land."""
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0, pods_total=1)
+        state = ClusterState([n1])
+        state.place(_vm("filler", cpu=1.0, memory_mb=1000.0), n1)
+
+        displaced = [_vm("v1", cpu=2.0, memory_mb=5_000.0)]
+        d_cpu, d_mem = _simulate_failure([n1], displaced)
+        assert d_cpu == 2.0
+        assert d_mem == 5_000.0
+
     def test_spreads_across_multiple_survivors(self) -> None:
         """VMs spread across multiple survivors when one fills up."""
         n1 = _inv_node(index=1, cpu_total=10.0, memory_total=50_000.0)

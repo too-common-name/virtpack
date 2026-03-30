@@ -28,7 +28,7 @@ def _profile_fits_vm(
     """Return True if an *empty* node of this profile can host *vm*."""
     cpu, mem, pods = normalize_node_capacity(
         topology=profile.cpu_topology,
-        ram_gb=profile.ram_gb,
+        total_memory_mb=float(profile.ram_gb) * 1024.0,
         config=config,
     )
     return vm.cpu <= cpu and vm.memory_mb <= mem and vm.pods <= pods

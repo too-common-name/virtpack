@@ -227,7 +227,7 @@ def _build_autodiscovery_nodes(
         )
         cpu_total, memory_total, pods_total = normalize_node_capacity(
             topology=topology,
-            ram_gb=max(1, host.memory_mb // 1024),  # MB → GB (floor)
+            total_memory_mb=float(host.memory_mb),
             config=config,
         )
         nodes.append(

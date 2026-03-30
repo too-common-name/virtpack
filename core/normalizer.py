@@ -157,7 +157,7 @@ def compute_effective_cpu(
 def compute_usable_capacity(
     *,
     topology: CpuTopology,
-    ram_gb: int,
+    total_memory_mb: float,
     overheads: VirtOverheads,
 ) -> tuple[float, float]:
     """Stage 2 — Subtract kubelet + OCP Virtualization overheads.
@@ -175,7 +175,6 @@ def compute_usable_capacity(
     usable_cpu = effective_cpu - kubelet_cpu - overheads.ocp_virt_core
 
     # ── Memory (all in MB) ──────────────────────────────────────────
-    total_memory_mb = float(ram_gb) * _GIB_TO_MB
     kubelet_mem = kubelet_reserved_memory_mb(total_memory_mb)
     usable_memory_mb = (
         total_memory_mb - kubelet_mem - overheads.eviction_hard_mb - overheads.ocp_virt_memory_mb
@@ -191,7 +190,7 @@ def compute_usable_capacity(
     if usable_memory_mb <= 0:
         raise ValueError(
             f"Negative usable memory ({usable_memory_mb:.1f} MB) after subtracting "
-            f"overheads from {ram_gb} GiB. "
+            f"overheads from {total_memory_mb:.0f} MB. "
             f"Check VirtOverheads or node topology."
         )
 
@@ -201,7 +200,7 @@ def compute_usable_capacity(
 def normalize_node_capacity(
     *,
     topology: CpuTopology,
-    ram_gb: int,
+    total_memory_mb: float,
     config: PlanConfig,
 ) -> tuple[float, float, int]:
     """Full node normalization pipeline: overheads + safety margins.
@@ -214,7 +213,7 @@ def normalize_node_capacity(
     """
     usable_cpu, usable_memory_mb = compute_usable_capacity(
         topology=topology,
-        ram_gb=ram_gb,
+        total_memory_mb=total_memory_mb,
         overheads=config.virt_overheads,
     )
 
@@ -248,7 +247,7 @@ def build_inventory_nodes(
     for profile in inventory.profiles:
         cpu_total, memory_total, pods_total = normalize_node_capacity(
             topology=profile.cpu_topology,
-            ram_gb=profile.ram_gb,
+            total_memory_mb=float(profile.ram_gb) * _GIB_TO_MB,
             config=config,
         )
         for i in range(1, profile.quantity + 1):
@@ -275,7 +274,7 @@ def build_catalog_node(
     """
     cpu_total, memory_total, pods_total = normalize_node_capacity(
         topology=profile.cpu_topology,
-        ram_gb=profile.ram_gb,
+        total_memory_mb=float(profile.ram_gb) * _GIB_TO_MB,
         config=config,
     )
     return Node.new_catalog(

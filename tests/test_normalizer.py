@@ -265,7 +265,7 @@ class TestComputeUsableCapacity:
         topo = _topo(sockets=2, cores_per_socket=32, threads_per_core=2)
         cpu, mem = compute_usable_capacity(
             topology=topo,
-            ram_gb=512,
+            total_memory_mb=512 * 1024.0,
             overheads=VirtOverheads(),
         )
         # effective_cpu = 64 × 1.5 = 96
@@ -283,7 +283,7 @@ class TestComputeUsableCapacity:
         topo = _topo(sockets=1, cores_per_socket=16, threads_per_core=1)
         cpu, mem = compute_usable_capacity(
             topology=topo,
-            ram_gb=64,
+            total_memory_mb=64 * 1024.0,
             overheads=VirtOverheads(),
         )
         # effective_cpu = 16 (no HT)
@@ -302,7 +302,7 @@ class TestComputeUsableCapacity:
         with pytest.raises(ValueError, match=r"Negative usable CPU"):
             compute_usable_capacity(
                 topology=topo,
-                ram_gb=512,
+                total_memory_mb=512 * 1024.0,
                 overheads=VirtOverheads(ocp_virt_core=10.0),  # huge overhead
             )
 
@@ -312,7 +312,7 @@ class TestComputeUsableCapacity:
         with pytest.raises(ValueError, match=r"Negative usable memory"):
             compute_usable_capacity(
                 topology=topo,
-                ram_gb=1,  # 1 GiB = 1024 MB, less than overheads
+                total_memory_mb=1024.0,  # 1 GiB = 1024 MB, less than overheads
                 overheads=VirtOverheads(ocp_virt_memory_mb=900.0, eviction_hard_mb=500.0),
             )
 
@@ -331,7 +331,7 @@ class TestNormalizeNodeCapacity:
         config = PlanConfig()
         cpu, mem, pods = normalize_node_capacity(
             topology=topo,
-            ram_gb=512,
+            total_memory_mb=512 * 1024.0,
             config=config,
         )
         # usable_cpu = 93.69 (from TestComputeUsableCapacity)
@@ -355,7 +355,7 @@ class TestNormalizeNodeCapacity:
         )
         cpu, mem, pods = normalize_node_capacity(
             topology=topo,
-            ram_gb=512,
+            total_memory_mb=512 * 1024.0,
             config=config,
         )
         # 100% utilization = no safety margin
@@ -366,7 +366,9 @@ class TestNormalizeNodeCapacity:
     def test_custom_pod_limit(self) -> None:
         topo = _topo(sockets=2, cores_per_socket=32, threads_per_core=2)
         config = PlanConfig(cluster_limits={"max_pods_per_node": 110})  # type: ignore[arg-type]
-        _, _, pods = normalize_node_capacity(topology=topo, ram_gb=512, config=config)
+        _, _, pods = normalize_node_capacity(
+            topology=topo, total_memory_mb=512 * 1024.0, config=config
+        )
         assert pods == 110
 
 

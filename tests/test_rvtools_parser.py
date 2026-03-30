@@ -440,3 +440,52 @@ class TestParseVhostEdgeCases:
         )
         with pytest.raises(RVToolsParseError, match="missing required columns"):
             parse_vhost(path)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Bad cell values (non-integer in numeric columns)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestBadCellValues:
+    """Non-numeric cells in integer columns raise RVToolsParseError."""
+
+    def test_vinfo_bad_cpus(self, tmp_path: Path) -> None:
+        path = _write_vinfo(
+            tmp_path,
+            [["vm1", "N/A", 4096, "poweredOn", False, False]],
+        )
+        with pytest.raises(RVToolsParseError, match="expected integer"):
+            parse_vinfo(path)
+
+    def test_vinfo_bad_memory(self, tmp_path: Path) -> None:
+        path = _write_vinfo(
+            tmp_path,
+            [["vm1", 4, "corrupt", "poweredOn", False, False]],
+        )
+        with pytest.raises(RVToolsParseError, match="expected integer"):
+            parse_vinfo(path)
+
+    def test_vhost_bad_sockets(self, tmp_path: Path) -> None:
+        path = _write_vhost(
+            tmp_path,
+            [["host1", "bad", 8, True, 524288]],
+        )
+        with pytest.raises(RVToolsParseError, match="expected integer"):
+            parse_vhost(path)
+
+    def test_vhost_bad_memory(self, tmp_path: Path) -> None:
+        path = _write_vhost(
+            tmp_path,
+            [["host1", 2, 8, True, "N/A"]],
+        )
+        with pytest.raises(RVToolsParseError, match="expected integer"):
+            parse_vhost(path)
+
+    def test_error_includes_row_and_column(self, tmp_path: Path) -> None:
+        path = _write_vinfo(
+            tmp_path,
+            [["myvm", "oops", 4096, "poweredOn", False, False]],
+        )
+        with pytest.raises(RVToolsParseError, match=r"row 'myvm'.*column 'CPUs'"):
+            parse_vinfo(path)

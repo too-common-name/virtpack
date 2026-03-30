@@ -137,6 +137,18 @@ def _check_columns(
         )
 
 
+def _safe_int(value: object, *, column: str, row_label: str, sheet: str, path: Path) -> int:
+    """Convert a cell value to int, raising RVToolsParseError on failure."""
+    try:
+        return int(value)  # type: ignore[call-overload, no-any-return]
+    except (ValueError, TypeError) as exc:
+        raise RVToolsParseError(
+            path,
+            f"sheet '{sheet}', row '{row_label}', column '{column}': "
+            f"expected integer, got {value!r}",
+        ) from exc
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # vInfo parsing (VM workloads)
 # ═══════════════════════════════════════════════════════════════════════
@@ -199,8 +211,12 @@ def parse_vinfo(path: Path) -> list[RawVM]:
         vms.append(
             RawVM(
                 name=name,
-                cpu=int(row["cpus"]),
-                memory_mb=int(row["memory"]),
+                cpu=_safe_int(
+                    row["cpus"], column="CPUs", row_label=name, sheet="vInfo", path=path
+                ),
+                memory_mb=_safe_int(
+                    row["memory"], column="Memory", row_label=name, sheet="vInfo", path=path
+                ),
             )
         )
 
@@ -258,9 +274,13 @@ def parse_vhost(path: Path) -> list[RawHost]:
         if not name:
             continue
 
-        sockets = int(row["# cpu"])
-        cores_per_socket = int(row["cores per cpu"])
-        memory_mb = int(row["# memory"])
+        sockets = _safe_int(row["# cpu"], column="# CPU", row_label=name, sheet="vHost", path=path)
+        cores_per_socket = _safe_int(
+            row["cores per cpu"], column="Cores per CPU", row_label=name, sheet="vHost", path=path
+        )
+        memory_mb = _safe_int(
+            row["# memory"], column="# Memory", row_label=name, sheet="vHost", path=path
+        )
 
         # HT Active is optional — default to False (conservative)
         if "ht active" in df.columns and not pd.isna(row["ht active"]):

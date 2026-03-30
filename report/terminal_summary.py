@@ -205,6 +205,7 @@ class PlanSummary:
     pressure_max: float  # Node Pressure maximum
 
     # HA
+    ha_enabled: bool
     ha_fully_covered: bool
     ha_deficit_cpu: float
     ha_deficit_memory: float
@@ -423,6 +424,7 @@ def compute_summary(
         cfi=cfi,
         pressure_p95=p95,
         pressure_max=p_max,
+        ha_enabled=ha_result is not None,
         ha_fully_covered=ha_covered,
         ha_deficit_cpu=ha_def_cpu,
         ha_deficit_memory=ha_def_mem,
@@ -768,7 +770,7 @@ def render_summary(
         render_comparison(vmware, summary)
 
     # ── 6. HA status ──────────────────────────────────────────────
-    if summary.ha_nodes_reclaimed > 0 or summary.ha_nodes > 0 or not summary.ha_fully_covered:
+    if summary.ha_enabled:
         ha_lines = ""
         if summary.ha_nodes_reclaimed > 0:
             ha_lines += (
@@ -778,6 +780,8 @@ def render_summary(
         if summary.ha_nodes > 0:
             ha_lines += f"Added {summary.ha_nodes} catalog HA spare node(s)\n"
         if summary.ha_fully_covered:
+            if not ha_lines:
+                ha_lines = "Existing spare capacity is sufficient\n"
             ha_lines += "[bold green]HA requirement: SATISFIED[/bold green]"
             console.print(
                 Panel(

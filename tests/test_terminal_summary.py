@@ -80,6 +80,7 @@ def _plan_summary(**overrides: object) -> PlanSummary:
         "cfi": 0.05,
         "pressure_p95": 0.5,
         "pressure_max": 0.5,
+        "ha_enabled": True,
         "ha_fully_covered": True,
         "ha_deficit_cpu": 0.0,
         "ha_deficit_memory": 0.0,

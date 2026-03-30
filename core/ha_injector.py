@@ -271,6 +271,8 @@ def inject_ha_nodes(
         sorted(unused_pool, key=lambda n: n.memory_total, reverse=True) if unused_pool else []
     )
 
+    prev_deficit: tuple[float, float] | None = None
+
     while True:
         deficit_cpu, deficit_mem = compute_ha_deficit(state, n_failures)
         if deficit_cpu <= 0.0 and deficit_mem <= 0.0:
@@ -283,10 +285,22 @@ def inject_ha_nodes(
                 unused_pool.remove(node)
             state.add_node(node)
             nodes_reclaimed.append(node)
+            prev_deficit = None  # reset after pool reclaim
             continue
 
         # Phase 2: Add catalog node
         if cheapest_profile is not None:
+            if prev_deficit is not None and (deficit_cpu, deficit_mem) == prev_deficit:
+                # Last catalog node didn't reduce the deficit — profile is
+                # too small to absorb any displaced VM.  Stop to avoid an
+                # infinite loop.
+                return HAResult(
+                    nodes_reclaimed=nodes_reclaimed,
+                    nodes_added=nodes_added,
+                    deficit_cpu=deficit_cpu,
+                    deficit_memory=deficit_mem,
+                )
+            prev_deficit = (deficit_cpu, deficit_mem)
             ha_counter += 1
             node = _build_ha_node(cheapest_profile, ha_counter, config)
             state.add_node(node)

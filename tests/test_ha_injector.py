@@ -520,6 +520,25 @@ class TestInjectHANodes:
         assert all(not n.is_inventory for n in result.nodes_added)
         assert all(n.cost_weight > 0 for n in result.nodes_added)
 
+    def test_catalog_too_small_terminates(self) -> None:
+        """Catalog profile too small for any displaced VM → terminates with deficit."""
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("huge", cpu=90.0, memory_mb=350_000.0), n1)
+
+        tiny = _catalog_profile(name="tiny", ram_gb=4, cost=0.1)
+        tiny_catalog = _catalog(tiny)
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            catalog=tiny_catalog,
+        )
+        assert result.fully_covered is False
+        assert result.deficit_cpu > 0.0
+        assert result.deficit_memory > 0.0
+        assert len(result.nodes_added) <= 2
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Unused pool reclamation (consolidate mode HA)

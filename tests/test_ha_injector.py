@@ -351,6 +351,30 @@ class TestComputeHADeficit:
 
         assert compute_ha_deficit(state, 1) == (0.0, 0.0)
 
+    def test_worst_case_independent_dimensions(self) -> None:
+        """Worst-case must track CPU and memory independently.
+
+        Scenario: 3 nodes, N=1.
+        - Failing n1 displaces cpu-hog (48 CPU, 5k MB).  n2 has only
+          500 MB free, n3 is too small → CPU deficit = 48.
+        - Failing n2 displaces mem-hog (1 CPU, 49.5k MB).  Neither
+          survivor has enough memory → memory deficit = 49500.
+
+        The old sum-based comparison would pick the n2-fail scenario
+        (higher sum) and report only 1 CPU deficit, missing the 48-core
+        shortage from n1-fail.
+        """
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=50_000.0)
+        n2 = _inv_node(index=2, cpu_total=50.0, memory_total=50_000.0)
+        n3 = _inv_node(index=3, cpu_total=10.0, memory_total=3_000.0)
+        state = ClusterState([n1, n2, n3])
+        state.place(_vm("cpu-hog", cpu=48.0, memory_mb=5_000.0), n1)
+        state.place(_vm("mem-hog", cpu=1.0, memory_mb=49_500.0), n2)
+
+        d_cpu, d_mem = compute_ha_deficit(state, 1)
+        assert d_cpu == 48.0
+        assert d_mem == 49_500.0
+
     def test_stranded_capacity_causes_deficit(self) -> None:
         """Regression: stranded CPU on memory-full node must NOT satisfy HA.
 

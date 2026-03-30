@@ -191,8 +191,12 @@ def compute_ha_deficit(
 
         deficit_cpu, deficit_mem = _simulate_failure(surviving, displaced)
 
-        if deficit_cpu + deficit_mem > worst_cpu + worst_mem:
-            worst_cpu, worst_mem = deficit_cpu, deficit_mem
+        # Keep the scenario with the larger deficit in either dimension.
+        # Comparing dimensions independently avoids mixing incompatible
+        # units (cores vs MB).
+        if (deficit_cpu > worst_cpu) or (deficit_mem > worst_mem):
+            worst_cpu = max(worst_cpu, deficit_cpu)
+            worst_mem = max(worst_mem, deficit_mem)
 
     return (worst_cpu, worst_mem)
 

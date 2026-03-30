@@ -4,12 +4,9 @@ from __future__ import annotations
 
 from core.cluster_state import ClusterState
 from core.ha_injector import (
-    HARequirement,
     HAResult,
     _simulate_failure,
-    compute_current_spare,
     compute_ha_deficit,
-    compute_ha_requirements,
     inject_ha_nodes,
 )
 from models.config import (
@@ -78,16 +75,11 @@ def _place_vm(state: ClusterState, vm: VM, node: Node) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# HARequirement / HAResult containers
+# HAResult container
 # ═══════════════════════════════════════════════════════════════════════
 
 
 class TestContainers:
-    def test_ha_requirement_fields(self) -> None:
-        r = HARequirement(required_spare_cpu=10.0, required_spare_memory=5000.0)
-        assert r.required_spare_cpu == 10.0
-        assert r.required_spare_memory == 5000.0
-
     def test_ha_result_defaults(self) -> None:
         r = HAResult()
         assert r.nodes_added == []
@@ -98,117 +90,6 @@ class TestContainers:
     def test_ha_result_deficit(self) -> None:
         r = HAResult(deficit_cpu=5.0, deficit_memory=1000.0)
         assert r.fully_covered is False
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# compute_ha_requirements
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class TestComputeHARequirements:
-    def test_zero_failures_returns_zeros(self) -> None:
-        state = ClusterState([_inv_node()])
-        req = compute_ha_requirements(state, 0)
-        assert req.required_spare_cpu == 0.0
-        assert req.required_spare_memory == 0.0
-
-    def test_negative_failures_returns_zeros(self) -> None:
-        state = ClusterState([_inv_node()])
-        req = compute_ha_requirements(state, -1)
-        assert req.required_spare_cpu == 0.0
-        assert req.required_spare_memory == 0.0
-
-    def test_empty_cluster_returns_zeros(self) -> None:
-        state = ClusterState()
-        req = compute_ha_requirements(state, 1)
-        assert req.required_spare_cpu == 0.0
-        assert req.required_spare_memory == 0.0
-
-    def test_no_active_nodes_returns_zeros(self) -> None:
-        """Nodes exist but nothing placed → no active nodes."""
-        state = ClusterState([_inv_node()])
-        req = compute_ha_requirements(state, 1)
-        assert req.required_spare_cpu == 0.0
-        assert req.required_spare_memory == 0.0
-
-    def test_single_failure_single_node(self) -> None:
-        node = _inv_node()
-        state = ClusterState([node])
-        vm = _vm("vm1", cpu=20.0, memory_mb=50_000.0)
-        state.place(vm, node)
-
-        req = compute_ha_requirements(state, 1)
-        assert req.required_spare_cpu == 20.0
-        assert req.required_spare_memory == 50_000.0
-
-    def test_single_failure_picks_heaviest(self) -> None:
-        """N=1: picks the single node with the most used in each dimension."""
-        n1 = _inv_node(index=1)
-        n2 = _inv_node(index=2)
-        state = ClusterState([n1, n2])
-
-        # n1: 30 CPU used, 80_000 MB used
-        state.place(_vm("heavy-cpu", cpu=30.0, memory_mb=80_000.0), n1)
-        # n2: 10 CPU used, 120_000 MB used
-        state.place(_vm("heavy-mem", cpu=10.0, memory_mb=120_000.0), n2)
-
-        req = compute_ha_requirements(state, 1)
-        assert req.required_spare_cpu == 30.0  # from n1
-        assert req.required_spare_memory == 120_000.0  # from n2
-
-    def test_two_failures_sums_top_two(self) -> None:
-        """N=2: sums the two most loaded nodes per dimension."""
-        n1 = _inv_node(index=1)
-        n2 = _inv_node(index=2)
-        n3 = _inv_node(index=3)
-        state = ClusterState([n1, n2, n3])
-
-        state.place(_vm("a", cpu=30.0, memory_mb=100_000.0), n1)
-        state.place(_vm("b", cpu=20.0, memory_mb=80_000.0), n2)
-        state.place(_vm("c", cpu=10.0, memory_mb=60_000.0), n3)
-
-        req = compute_ha_requirements(state, 2)
-        # Top-2 CPU: 30 + 20 = 50
-        assert req.required_spare_cpu == 50.0
-        # Top-2 memory: 100k + 80k = 180k
-        assert req.required_spare_memory == 180_000.0
-
-    def test_n_exceeds_active_clamps(self) -> None:
-        """If N > active nodes, clamp to the actual count."""
-        n1 = _inv_node(index=1)
-        state = ClusterState([n1])
-        state.place(_vm("a", cpu=10.0, memory_mb=50_000.0), n1)
-
-        req = compute_ha_requirements(state, 5)
-        assert req.required_spare_cpu == 10.0
-        assert req.required_spare_memory == 50_000.0
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# compute_current_spare
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class TestComputeCurrentSpare:
-    def test_empty_cluster(self) -> None:
-        state = ClusterState()
-        assert compute_current_spare(state) == (0.0, 0.0)
-
-    def test_unused_nodes_full_spare(self) -> None:
-        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0)
-        n2 = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
-        state = ClusterState([n1, n2])
-        spare_cpu, spare_mem = compute_current_spare(state)
-        assert spare_cpu == 180.0
-        assert spare_mem == 700_000.0
-
-    def test_partial_usage(self) -> None:
-        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0)
-        state = ClusterState([n1])
-        state.place(_vm("a", cpu=40.0, memory_mb=100_000.0), n1)
-        spare_cpu, spare_mem = compute_current_spare(state)
-        assert spare_cpu == 60.0
-        assert spare_mem == 300_000.0
 
 
 # ═══════════════════════════════════════════════════════════════════════

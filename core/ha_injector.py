@@ -35,14 +35,6 @@ if TYPE_CHECKING:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-@dataclass(frozen=True)
-class HARequirement:
-    """Worst-case spare capacity needed to survive ``n`` node failures."""
-
-    required_spare_cpu: float
-    required_spare_memory: float
-
-
 @dataclass
 class HAResult:
     """Outcome of the HA injection phase."""
@@ -56,54 +48,6 @@ class HAResult:
     def fully_covered(self) -> bool:
         """True if the HA requirement is fully satisfied."""
         return self.deficit_cpu <= 0.0 and self.deficit_memory <= 0.0
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Pure calculations
-# ═══════════════════════════════════════════════════════════════════════
-
-
-def compute_ha_requirements(
-    state: ClusterState,
-    n_failures: int,
-) -> HARequirement:
-    """Compute worst-case spare capacity for *n_failures* (HLD §7).
-
-    Evaluates CPU and memory independently:
-
-    * **CPU:** sum of ``cpu_used`` on the *N* most CPU-loaded active nodes.
-    * **Memory:** sum of ``memory_used`` on the *N* most memory-loaded
-      active nodes.
-
-    The worst-case sets may overlap (the heaviest CPU node may also be
-    the heaviest memory node) — this is correct because we must
-    survive *either* worst-case independently.
-
-    Returns zeros when ``n_failures <= 0`` or the cluster is empty.
-    """
-    if n_failures <= 0:
-        return HARequirement(0.0, 0.0)
-
-    active = state.active_nodes
-    if not active:
-        return HARequirement(0.0, 0.0)
-
-    n = min(n_failures, len(active))
-
-    top_cpu = sorted(active, key=lambda nd: nd.cpu_used, reverse=True)[:n]
-    top_mem = sorted(active, key=lambda nd: nd.memory_used, reverse=True)[:n]
-
-    return HARequirement(
-        required_spare_cpu=sum(nd.cpu_used for nd in top_cpu),
-        required_spare_memory=sum(nd.memory_used for nd in top_mem),
-    )
-
-
-def compute_current_spare(state: ClusterState) -> tuple[float, float]:
-    """Return ``(spare_cpu, spare_memory_mb)`` across all nodes."""
-    spare_cpu = sum(n.cpu_remaining for n in state.nodes)
-    spare_mem = sum(n.memory_remaining for n in state.nodes)
-    return (spare_cpu, spare_mem)
 
 
 # ═══════════════════════════════════════════════════════════════════════

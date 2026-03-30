@@ -472,9 +472,17 @@ def plan(
 
     out.print(f"\n[bold green]✓[/bold green] Placement map saved to [bold]{csv_path}[/bold]")
 
-    # Exit code: non-zero if VMs are unplaced
+    # Exit codes: 2 = unplaced VMs, 3 = uncovered HA deficit
     if result.unplaced:
+        out.print(f"\n[bold red]✗[/bold red] {len(result.unplaced)} VM(s) could not be placed")
         raise typer.Exit(code=2)
+
+    if ha_result is not None and not ha_result.fully_covered:
+        out.print(
+            "\n[bold red]✗[/bold red] HA deficit could not be fully covered — "
+            "cluster cannot tolerate the configured number of node failures"
+        )
+        raise typer.Exit(code=3)
 
 
 # ═══════════════════════════════════════════════════════════════════════

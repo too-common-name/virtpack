@@ -97,6 +97,12 @@ algorithm_weights:
         with pytest.raises(ConfigLoadError, match="invalid YAML"):
             load_plan_config(p)
 
+    def test_non_utf8_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "latin1.yaml"
+        p.write_bytes(b"key: caf\xe9\n")
+        with pytest.raises(ConfigLoadError, match="cannot read file"):
+            load_plan_config(p)
+
     def test_non_mapping_top_level(self, tmp_path: Path) -> None:
         p = _write(tmp_path, "list.yaml", "- item1\n- item2\n")
         with pytest.raises(ConfigLoadError, match="expected a YAML mapping"):

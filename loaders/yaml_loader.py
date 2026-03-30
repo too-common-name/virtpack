@@ -66,7 +66,7 @@ def _read_yaml(path: Path) -> dict[str, object]:
 
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ConfigLoadError(path, f"cannot read file: {exc}") from exc
 
     try:

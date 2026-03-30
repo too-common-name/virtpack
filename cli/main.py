@@ -403,6 +403,7 @@ def plan(
         config=plan_config,
         catalog=catalog_config,
         inventory_pool=inventory_pool,
+        strategy=effective_strategy,
     )
 
     catalog_node_count = len(state.catalog_nodes)

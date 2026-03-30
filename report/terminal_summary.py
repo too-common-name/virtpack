@@ -7,6 +7,7 @@ rendering and logic strictly decoupled.
 Key metrics:
 
 * **VMware Source Environment** — hosts, capacity, VM demand, overcommit.
+* **Resource Skew Warnings** — VMs with extreme memory:CPU ratios.
 * **Cluster Plan Summary** (§8.1) — node counts, utilization, bottleneck.
 * **Node Utilization** — per-node CPU/MEM breakdown.
 * **Engineering Metrics** (§8.2, §8.3) — CFI and node pressure.
@@ -16,6 +17,7 @@ Key metrics:
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -55,6 +57,82 @@ class VMwareSummary:
     # Computed ratios
     cpu_overcommit: float  # total_vcpu / total_logical_cpus
     mem_ratio: float  # total_vmem_gb / total_ram_gb
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Resource skew detection
+# ═══════════════════════════════════════════════════════════════════════
+
+# Default multiplier threshold:  a VM whose memory:CPU ratio exceeds
+# the fleet median by this factor (or falls below 1/factor) is flagged.
+_SKEW_THRESHOLD: float = 4.0
+
+
+@dataclass(frozen=True)
+class SkewedVM:
+    """A VM flagged for extreme memory:CPU resource imbalance."""
+
+    name: str
+    cpu: float  # normalized CPU cores
+    memory_gb: float
+    ratio: float  # memory_mb / cpu  (MB per core)
+    fleet_median_ratio: float
+    skew_factor: float  # ratio / fleet_median  (>1 = memory-heavy)
+    direction: str  # "memory-heavy" | "cpu-heavy"
+
+
+def detect_skewed_vms(
+    vms: list[VM],
+    *,
+    threshold: float = _SKEW_THRESHOLD,
+) -> list[SkewedVM]:
+    """Identify VMs whose memory:CPU ratio deviates heavily from the fleet.
+
+    A VM is flagged when its ``memory_mb / cpu`` ratio is more than
+    *threshold*× the fleet median (memory-heavy) or less than
+    ``1/threshold``× (CPU-heavy).
+
+    Returns a list sorted by skew factor descending (worst first).
+    """
+    if len(vms) < 2:
+        return []
+
+    # Compute per-VM ratio (MB of memory per normalized CPU core)
+    ratios = [vm.memory_mb / vm.cpu for vm in vms]
+    median_ratio = statistics.median(ratios)
+    if median_ratio == 0.0:
+        return []
+
+    result: list[SkewedVM] = []
+    for vm, ratio in zip(vms, ratios, strict=True):
+        skew_factor = ratio / median_ratio
+        if skew_factor > threshold:
+            result.append(
+                SkewedVM(
+                    name=vm.name,
+                    cpu=vm.cpu,
+                    memory_gb=vm.memory_mb / 1024.0,
+                    ratio=ratio,
+                    fleet_median_ratio=median_ratio,
+                    skew_factor=skew_factor,
+                    direction="memory-heavy",
+                )
+            )
+        elif skew_factor < 1.0 / threshold:
+            result.append(
+                SkewedVM(
+                    name=vm.name,
+                    cpu=vm.cpu,
+                    memory_gb=vm.memory_mb / 1024.0,
+                    ratio=ratio,
+                    fleet_median_ratio=median_ratio,
+                    skew_factor=skew_factor,
+                    direction="cpu-heavy",
+                )
+            )
+
+    result.sort(key=lambda s: s.skew_factor, reverse=True)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -140,6 +218,9 @@ class PlanSummary:
 
     # Unplaced VM names (for detail section)
     unplaced_vm_names: list[str] = field(default_factory=list)
+
+    # Resource skew warnings
+    skewed_vms: list[SkewedVM] = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -298,6 +379,9 @@ def compute_summary(
     # ── Consolidation ─────────────────────────────────────────────
     shutdown = len(unused_inventory) if unused_inventory else 0
 
+    # ── Resource skew warnings ─────────────────────────────────────
+    skewed = detect_skewed_vms(vms)
+
     # ── Per-node details ──────────────────────────────────────────
     details: list[NodeDetail] = []
     for n in nodes:
@@ -346,6 +430,7 @@ def compute_summary(
         shutdown_candidates=shutdown,
         node_details=details,
         unplaced_vm_names=[vm.name for vm in unplaced],
+        skewed_vms=skewed,
     )
 
 
@@ -384,6 +469,66 @@ def render_vmware_summary(vmware: VMwareSummary) -> None:
             border_style="yellow",
             width=55,
         )
+    )
+
+
+def render_skew_warnings(skewed: list[SkewedVM]) -> None:
+    """Print a warning table for VMs with extreme resource skew."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if not skewed:
+        return
+
+    console = Console()
+
+    table = Table(
+        show_header=True,
+        header_style="bold yellow",
+        show_lines=False,
+    )
+    table.add_column("VM", style="bold")
+    table.add_column("CPU (cores)", justify="right")
+    table.add_column("Memory (GB)", justify="right")
+    table.add_column("Ratio", justify="right")
+    table.add_column("Skew", justify="right")
+    table.add_column("Direction")
+
+    for s in skewed[:10]:  # Cap at 10 to avoid flooding
+        table.add_row(
+            s.name,
+            f"{s.cpu:.1f}",
+            f"{s.memory_gb:,.0f}",
+            f"{s.ratio:,.0f} MB/core",
+            f"{s.skew_factor:.1f}x",
+            f"[yellow]{s.direction}[/yellow]",
+        )
+
+    if len(skewed) > 10:
+        table.add_row(
+            f"... +{len(skewed) - 10} more",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
+
+    # Fleet median context
+    median_str = f"{skewed[0].fleet_median_ratio:,.0f} MB/core"
+
+    console.print(
+        Panel(
+            table,
+            title="[bold yellow]⚠ Resource Skew Warnings[/bold yellow]",
+            subtitle=f"[dim]Fleet median: {median_str} | Threshold: {_SKEW_THRESHOLD}x[/dim]",
+            border_style="yellow",
+        )
+    )
+    console.print(
+        "[dim]  Tip: Skewed VMs strand node capacity. Consider right-sizing "
+        "before migration.[/dim]\n"
     )
 
 
@@ -541,6 +686,10 @@ def render_summary(
     if vmware is not None:
         render_vmware_summary(vmware)
         console.print()
+
+    # ── 1b. Resource skew warnings ─────────────────────────────────
+    if summary.skewed_vms:
+        render_skew_warnings(summary.skewed_vms)
 
     # ── 2. Main summary panel ─────────────────────────────────────
     lines = Text()

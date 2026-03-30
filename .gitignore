@@ -20,3 +20,5 @@ report/__pycache__/
 virtpack.egg-info/
 
 out/
+
+config/

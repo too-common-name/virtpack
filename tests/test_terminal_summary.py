@@ -12,6 +12,7 @@ from models.vm import VM
 from report.terminal_summary import (
     NodeDetail,
     PlanSummary,
+    SkewedVM,
     VMwareSummary,
     _compute_cfi,
     _determine_bottleneck,
@@ -19,8 +20,10 @@ from report.terminal_summary import (
     _percentile,
     compute_summary,
     compute_vmware_summary,
+    detect_skewed_vms,
     render_comparison,
     render_node_table,
+    render_skew_warnings,
     render_summary,
     render_vmware_summary,
 )
@@ -623,3 +626,148 @@ class TestRenderNodeTable:
         assert "Node Utilization" in captured.out
         assert "n1" in captured.out
         assert "inv" in captured.out
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Resource skew detection tests
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestDetectSkewedVMs:
+    """Tests for ``detect_skewed_vms``."""
+
+    def test_empty_fleet(self) -> None:
+        """No VMs → no warnings."""
+        assert detect_skewed_vms([]) == []
+
+    def test_single_vm_returns_empty(self) -> None:
+        """A fleet of 1 VM can't be compared → no warnings."""
+        assert detect_skewed_vms([_make_vm("vm1")]) == []
+
+    def test_balanced_fleet_no_warnings(self) -> None:
+        """All VMs with similar ratios → no warnings."""
+        vms = [
+            _make_vm("a", cpu=2.0, memory_mb=4096.0),
+            _make_vm("b", cpu=4.0, memory_mb=8192.0),
+            _make_vm("c", cpu=1.0, memory_mb=2048.0),
+        ]
+        assert detect_skewed_vms(vms) == []
+
+    def test_memory_heavy_outlier_flagged(self) -> None:
+        """A VM with memory:CPU ratio >> fleet median is flagged."""
+        normal = [_make_vm(f"vm{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+        # This VM: 2 CPU, 393216 MB → ratio ~196k vs fleet median ~2048
+        monster = _make_vm("monster", cpu=2.0, memory_mb=393216.0)
+        vms = [*normal, monster]
+
+        result = detect_skewed_vms(vms)
+
+        assert len(result) == 1
+        assert result[0].name == "monster"
+        assert result[0].direction == "memory-heavy"
+        assert result[0].skew_factor > 4.0
+
+    def test_cpu_heavy_outlier_flagged(self) -> None:
+        """A VM with memory:CPU ratio << fleet median is flagged."""
+        normal = [_make_vm(f"vm{i}", cpu=2.0, memory_mb=8192.0) for i in range(10)]
+        # This VM: 100 CPU, 512 MB → ratio 5.12 vs fleet median ~4096
+        cpu_monster = _make_vm("cpu-beast", cpu=100.0, memory_mb=512.0)
+        vms = [*normal, cpu_monster]
+
+        result = detect_skewed_vms(vms)
+
+        assert len(result) == 1
+        assert result[0].name == "cpu-beast"
+        assert result[0].direction == "cpu-heavy"
+        assert result[0].skew_factor < 0.25
+
+    def test_custom_threshold(self) -> None:
+        """A stricter threshold catches more VMs."""
+        # Fleet median ratio = 2048 MB/core
+        normal = [_make_vm(f"vm{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+        # This VM: ratio = 8192 → 4x the median (exactly at default threshold)
+        mild = _make_vm("mild-outlier", cpu=2.0, memory_mb=16384.0)
+        vms = [*normal, mild]
+
+        # Default threshold (4x) — mild outlier is at exactly 4x, not above
+        default_result = detect_skewed_vms(vms, threshold=4.0)
+        # With a stricter threshold (3x) the mild outlier IS flagged
+        strict_result = detect_skewed_vms(vms, threshold=3.0)
+
+        assert len(strict_result) >= len(default_result)
+
+    def test_sorted_by_skew_factor_descending(self) -> None:
+        """Results are sorted worst-first (highest skew_factor first)."""
+        normal = [_make_vm(f"vm{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+        big = _make_vm("big", cpu=2.0, memory_mb=100_000.0)
+        huge = _make_vm("huge", cpu=2.0, memory_mb=400_000.0)
+        vms = [*normal, big, huge]
+
+        result = detect_skewed_vms(vms)
+
+        if len(result) >= 2:
+            assert result[0].skew_factor >= result[1].skew_factor
+            assert result[0].name == "huge"
+
+    def test_skewed_vms_in_compute_summary(self) -> None:
+        """Skewed VMs are populated via compute_summary."""
+        n1 = _make_node("n1", cpu_total=200.0, memory_total=500_000.0)
+        normal = [_make_vm(f"v{i}", cpu=2.0, memory_mb=4096.0) for i in range(10)]
+        monster = _make_vm("monster", cpu=2.0, memory_mb=393216.0)
+        all_vms = [*normal, monster]
+
+        state = ClusterState([n1])
+        for vm in all_vms:
+            state.place(vm, n1)
+
+        summary = compute_summary(state=state, vms=all_vms, unplaced=[])
+
+        assert len(summary.skewed_vms) >= 1
+        assert summary.skewed_vms[0].name == "monster"
+
+
+class TestRenderSkewWarnings:
+    """Smoke tests for render_skew_warnings."""
+
+    def test_empty_list_no_output(self, capsys: pytest.CaptureFixture[str]) -> None:
+        render_skew_warnings([])
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_renders_warning_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        skewed = [
+            SkewedVM(
+                name="monster-vm",
+                cpu=2.67,
+                memory_gb=384.0,
+                ratio=147_191.0,
+                fleet_median_ratio=11_000.0,
+                skew_factor=13.4,
+                direction="memory-heavy",
+            ),
+        ]
+        render_skew_warnings(skewed)
+        captured = capsys.readouterr()
+        assert "Resource Skew" in captured.out
+        assert "monster-vm" in captured.out
+        # Rich may truncate "memory-heavy" depending on terminal width
+        assert "memory-he" in captured.out
+
+    def test_render_summary_includes_skew_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        """render_summary shows skew warnings when present."""
+        skewed = [
+            SkewedVM(
+                name="skewed-vm",
+                cpu=2.0,
+                memory_gb=384.0,
+                ratio=196_608.0,
+                fleet_median_ratio=2048.0,
+                skew_factor=96.0,
+                direction="memory-heavy",
+            ),
+        ]
+        summary = _plan_summary(skewed_vms=skewed)
+        render_summary(summary)
+        captured = capsys.readouterr()
+        assert "Resource Skew" in captured.out
+        assert "skewed-vm" in captured.out

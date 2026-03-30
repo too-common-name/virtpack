@@ -16,6 +16,7 @@ from models.config import (
     CatalogConfig,
     CatalogProfile,
     CpuTopology,
+    PlacementStrategy,
     PlanConfig,
 )
 from models.node import Node
@@ -203,6 +204,32 @@ class TestScoreCandidates:
 
         # Stranded node wins because placing the VM *reduces* its penalty
         assert best is n_stranded
+
+    def test_consolidate_prefers_fuller_node(self) -> None:
+        """With consolidate strategy + spread-only weights, the heavier node wins."""
+        weights = AlgorithmWeights(
+            alpha_balance=0.0,
+            beta_spread=1.0,
+            gamma_pod_headroom=0.0,
+            delta_frag_penalty=0.0,
+        )
+        n_light = _inv_node(index=1)
+        n_heavy = _inv_node(index=2)
+        n_heavy.cpu_used = 60.0
+        n_heavy.memory_used = 200_000.0
+        n_heavy.pods_used = 100
+
+        state = ClusterState([n_light, n_heavy])
+        vm = _vm("v1")
+        best = _score_candidates(
+            candidates=[n_light, n_heavy],
+            vm=vm,
+            next_vm=None,
+            state=state,
+            weights=weights,
+            strategy=PlacementStrategy.CONSOLIDATE,
+        )
+        assert best is n_heavy
 
     def test_lookahead_rollback_leaves_state_clean(self) -> None:
         """After scoring, no nodes should have modified usage."""
@@ -488,8 +515,8 @@ class TestPullFromPool:
         vm = _vm("v1")
         assert _pull_from_pool(vm, pool) is None
 
-    def test_prefers_largest_node(self) -> None:
-        """Should pick the node with the most capacity (consolidation heuristic)."""
+    def test_no_demand_prefers_largest_node(self) -> None:
+        """No remaining demand → fall back to largest node."""
         small = _inv_node(index=1, cpu_total=10.0, memory_total=50_000.0)
         large = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
         pool = [small, large]
@@ -498,6 +525,54 @@ class TestPullFromPool:
         assert result is large
         assert len(pool) == 1
         assert pool[0] is small
+
+    def test_demand_picks_smallest_covering_node(self) -> None:
+        """When a small node covers total remaining demand, pick it."""
+        small = _inv_node(index=1, cpu_total=20.0, memory_total=100_000.0)
+        large = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
+        pool = [small, large]
+        vm = _vm("v1", cpu=2.0, memory_mb=4096.0)
+        result = _pull_from_pool(
+            vm,
+            pool,
+            remaining_cpu=10.0,
+            remaining_mem=50_000.0,
+        )
+        assert result is small
+        assert len(pool) == 1
+        assert pool[0] is large
+
+    def test_demand_falls_back_to_largest(self) -> None:
+        """When no node covers remaining demand, fall back to largest."""
+        small = _inv_node(index=1, cpu_total=20.0, memory_total=100_000.0)
+        large = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
+        pool = [small, large]
+        vm = _vm("v1", cpu=2.0, memory_mb=4096.0)
+        result = _pull_from_pool(
+            vm,
+            pool,
+            remaining_cpu=200.0,
+            remaining_mem=500_000.0,
+        )
+        assert result is large
+        assert len(pool) == 1
+        assert pool[0] is small
+
+    def test_demand_picks_smallest_among_covering(self) -> None:
+        """Among multiple nodes that cover demand, pick the smallest."""
+        small = _inv_node(index=1, cpu_total=30.0, memory_total=120_000.0)
+        medium = _inv_node(index=2, cpu_total=50.0, memory_total=200_000.0)
+        large = _inv_node(index=3, cpu_total=80.0, memory_total=300_000.0)
+        pool = [small, medium, large]
+        vm = _vm("v1", cpu=2.0, memory_mb=4096.0)
+        result = _pull_from_pool(
+            vm,
+            pool,
+            remaining_cpu=25.0,
+            remaining_mem=100_000.0,
+        )
+        assert result is small
+        assert len(pool) == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -520,6 +595,7 @@ class TestConsolidateMode:
             config=_config(),
             catalog=None,
             inventory_pool=pool,
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
 
         assert result.unplaced == []
@@ -555,6 +631,7 @@ class TestConsolidateMode:
             config=_config(),
             catalog=None,
             inventory_pool=consolidate_pool,
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
         consolidate_active = len(consolidate_state.nodes)
 
@@ -580,6 +657,7 @@ class TestConsolidateMode:
             config=_config(),
             catalog=catalog,
             inventory_pool=pool,
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
 
         assert result.unplaced == []
@@ -601,6 +679,7 @@ class TestConsolidateMode:
             config=_config(),
             catalog=None,
             inventory_pool=pool,
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
 
         assert result.state.total_placed_vms == 1
@@ -619,6 +698,7 @@ class TestConsolidateMode:
             config=_config(),
             catalog=None,
             inventory_pool=pool,
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
 
         assert result.state.total_placed_vms == 1
@@ -637,11 +717,45 @@ class TestConsolidateMode:
             config=_config(),
             catalog=catalog,
             inventory_pool=[],
+            strategy=PlacementStrategy.CONSOLIDATE,
         )
 
         assert result.unplaced == []
         assert result.state.total_placed_vms == 1
         assert len(result.state.catalog_nodes) == 1
+
+    def test_consolidate_packs_onto_fullest_node(self) -> None:
+        """With MostAllocated scoring, VMs should pack onto the fuller node.
+
+        Two active nodes with different load levels, small VMs that fit on
+        both.  In consolidate mode the scorer should prefer the heavier node,
+        preserving free blocks on the lighter one.
+        """
+        n_heavy = _inv_node(index=1, cpu_total=80.0, memory_total=300_000.0)
+        n_light = _inv_node(index=2, cpu_total=80.0, memory_total=300_000.0)
+        # Pre-load the heavy node
+        n_heavy.cpu_used = 40.0
+        n_heavy.memory_used = 150_000.0
+        n_heavy.pods_used = 50
+
+        state = ClusterState([n_heavy, n_light])
+        vms = [_vm(f"v{i}", cpu=1.0, memory_mb=2048.0) for i in range(4)]
+
+        result = run_placement(
+            vms=vms,
+            state=state,
+            config=_config(),
+            catalog=None,
+            strategy=PlacementStrategy.CONSOLIDATE,
+        )
+
+        assert result.unplaced == []
+        heavy_vms = len(result.state.node_vm_map[n_heavy.id])
+        light_vms = len(result.state.node_vm_map[n_light.id])
+        assert heavy_vms > light_vms, (
+            f"Consolidate should pack onto the fuller node, "
+            f"but got heavy={heavy_vms}, light={light_vms}"
+        )
 
     def test_deterministic_consolidation(self) -> None:
         """Consolidation produces identical results across runs."""
@@ -658,6 +772,7 @@ class TestConsolidateMode:
                 config=_config(),
                 catalog=None,
                 inventory_pool=pool,
+                strategy=PlacementStrategy.CONSOLIDATE,
             )
             return result.state.placement_map, len(result.unused_inventory)
 

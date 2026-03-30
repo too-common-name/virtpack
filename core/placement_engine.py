@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from algorithms.expander import expand
 from algorithms.scorer import score_node
+from models.config import PlacementStrategy
 
 if TYPE_CHECKING:
     from core.cluster_state import ClusterState
@@ -49,13 +50,23 @@ _LOOKAHEAD_PENALTY: float = -10.0
 _LOOKAHEAD_WEIGHT: float = 0.5
 
 
-def _pull_from_pool(vm: VM, pool: list[Node]) -> Node | None:
+def _pull_from_pool(
+    vm: VM,
+    pool: list[Node],
+    *,
+    remaining_cpu: float = 0.0,
+    remaining_mem: float = 0.0,
+) -> Node | None:
     """Pick the best inventory node from *pool* that can fit *vm*.
 
-    Selection heuristic: pick the node with the **most total capacity**
-    (memory first, then CPU).  This gives the largest available node to
-    the current VM, maximizing room for follow-on VMs to pack alongside
-    it — which is exactly what consolidation wants.
+    When *remaining_cpu* / *remaining_mem* are provided (total demand of
+    all VMs still to be placed), the heuristic picks the **smallest**
+    eligible node whose total capacity covers that remaining demand.
+    If no single node covers it, fall back to the **largest** eligible
+    node to maximise co-location and minimise cascading pulls.
+
+    When remaining demand is zero (or not provided), fall back to the
+    largest node — the safe default.
 
     The chosen node is **removed** from *pool* and returned (or ``None``
     if no node in the pool fits).
@@ -63,8 +74,18 @@ def _pull_from_pool(vm: VM, pool: list[Node]) -> Node | None:
     eligible = [n for n in pool if n.fits(vm)]
     if not eligible:
         return None
-    # Largest node first (most room for future co-located VMs)
-    best = max(eligible, key=lambda n: (n.memory_total, n.cpu_total))
+
+    if remaining_cpu > 0 or remaining_mem > 0:
+        covers = [
+            n for n in eligible if n.cpu_total >= remaining_cpu and n.memory_total >= remaining_mem
+        ]
+        if covers:
+            best = min(covers, key=lambda n: (n.memory_total, n.cpu_total))
+        else:
+            best = max(eligible, key=lambda n: (n.memory_total, n.cpu_total))
+    else:
+        best = max(eligible, key=lambda n: (n.memory_total, n.cpu_total))
+
     pool.remove(best)
     return best
 
@@ -76,6 +97,7 @@ def run_placement(
     config: PlanConfig,
     catalog: CatalogConfig | None = None,
     inventory_pool: list[Node] | None = None,
+    strategy: PlacementStrategy = PlacementStrategy.SPREAD,
 ) -> PlacementResult:
     """Execute the full placement simulation.
 
@@ -107,6 +129,9 @@ def run_placement(
         When no active node fits a VM, the engine pulls a node from
         this pool (free, cost=0) before attempting catalog expansion.
         ``None`` or empty list means no pool (spread mode).
+    strategy : PlacementStrategy
+        Scoring strategy.  ``SPREAD`` uses LeastAllocated (spread VMs
+        evenly); ``CONSOLIDATE`` uses MostAllocated (pack VMs tightly).
 
     Returns
     -------
@@ -127,7 +152,15 @@ def run_placement(
         # ── 2. EXPAND ────────────────────────────────────────────
         if not candidates:
             # 2a. Try inventory pool first (free nodes, consolidate mode)
-            pool_node = _pull_from_pool(vm, pool)
+            remaining = sorted_vms[idx:]
+            rem_cpu = sum(v.cpu for v in remaining)
+            rem_mem = sum(v.memory_mb for v in remaining)
+            pool_node = _pull_from_pool(
+                vm,
+                pool,
+                remaining_cpu=rem_cpu,
+                remaining_mem=rem_mem,
+            )
             if pool_node is not None:
                 state.add_node(pool_node)
                 candidates = [pool_node]
@@ -151,6 +184,7 @@ def run_placement(
             next_vm=next_vm,
             state=state,
             weights=weights,
+            strategy=strategy,
         )
 
         # ── 4. BIND ─────────────────────────────────────────────
@@ -170,6 +204,7 @@ def _score_candidates(
     next_vm: VM | None,
     state: ClusterState,
     weights: AlgorithmWeights,
+    strategy: PlacementStrategy = PlacementStrategy.SPREAD,
 ) -> Node:
     """Score candidates on **projected** state and return the best node.
 
@@ -178,15 +213,18 @@ def _score_candidates(
     scheduler approach and allows stranded nodes to "attract" VMs that
     reduce their dimensional imbalance.
 
+    The ``strategy`` parameter controls whether the allocation component
+    uses LeastAllocated (spread) or MostAllocated (consolidate).
+
     For each candidate::
 
         place(vm, node)
-        base_score = score_node(node)          # ← projected state
+        base_score = score_node(node, strategy=strategy)
 
         if next_vm exists:
             if node fits next_vm:
                 place(next_vm, node)
-                lookahead_score = score_node(node)  # ← projected with both VMs
+                lookahead_score = score_node(node, strategy=strategy)
                 unplace(next_vm, node)
             else:
                 lookahead_score = _LOOKAHEAD_PENALTY
@@ -200,14 +238,14 @@ def _score_candidates(
     for node in candidates:
         # ── Projected base score (with VM placed) ──────────────
         state.place(vm, node)
-        base = score_node(node, weights)
+        base = score_node(node, weights, strategy=strategy)
 
         # ── Lookahead (with both VM *and* next VM placed) ──────
         lookahead = 0.0
         if next_vm is not None:
             if node.fits(next_vm):
                 state.place(next_vm, node)
-                lookahead = score_node(node, weights)
+                lookahead = score_node(node, weights, strategy=strategy)
                 state.unplace(next_vm, node)
             else:
                 lookahead = _LOOKAHEAD_PENALTY

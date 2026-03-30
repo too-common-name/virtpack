@@ -7,11 +7,12 @@ import pytest
 from algorithms.scorer import (
     balance_score,
     fragmentation_penalty,
+    pack_score,
     pod_headroom_score,
     score_node,
     spread_score,
 )
-from models.config import AlgorithmWeights
+from models.config import AlgorithmWeights, PlacementStrategy
 from models.node import Node
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -85,6 +86,35 @@ class TestSpreadScore:
         """Half used on both → score 0.5."""
         n = _node(cpu_used=50.0, memory_used=50_000.0)
         assert spread_score(n) == pytest.approx(0.5)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# pack_score
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPackScore:
+    """pack = (cpu_util + mem_util) / 2  (MostAllocated, complement of spread)."""
+
+    def test_empty_node(self) -> None:
+        """Empty node → both idle → score 0.0."""
+        n = _node()
+        assert pack_score(n) == pytest.approx(0.0)
+
+    def test_full_node(self) -> None:
+        """Fully used → score 1.0."""
+        n = _node(cpu_used=100.0, memory_used=100_000.0)
+        assert pack_score(n) == pytest.approx(1.0)
+
+    def test_half_used(self) -> None:
+        """Half used on both → score 0.5."""
+        n = _node(cpu_used=50.0, memory_used=50_000.0)
+        assert pack_score(n) == pytest.approx(0.5)
+
+    def test_complement_of_spread(self) -> None:
+        """pack_score == 1 - spread_score for any node."""
+        n = _node(cpu_used=30.0, memory_used=70_000.0)
+        assert pack_score(n) == pytest.approx(1.0 - spread_score(n))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -250,6 +280,46 @@ class TestScoreNode:
         lopsided = _node(cpu_used=90.0, memory_used=30_000.0)
 
         assert score_node(balanced, weights) > score_node(lopsided, weights)
+
+    def test_fuller_node_scores_higher_pack(self) -> None:
+        """In consolidate mode, a fuller node scores higher on the alloc component."""
+        weights = AlgorithmWeights(
+            alpha_balance=0.0,
+            beta_spread=1.0,
+            gamma_pod_headroom=0.0,
+            delta_frag_penalty=0.0,
+        )
+        n_light = _node(cpu_used=20.0, memory_used=20_000.0)
+        n_heavy = _node(cpu_used=80.0, memory_used=80_000.0)
+        assert score_node(n_heavy, weights, strategy=PlacementStrategy.CONSOLIDATE) > score_node(
+            n_light, weights, strategy=PlacementStrategy.CONSOLIDATE
+        )
+
+    def test_consolidate_inverts_spread_preference(self) -> None:
+        """spread favors light node; consolidate favors heavy node."""
+        weights = AlgorithmWeights(
+            alpha_balance=0.0,
+            beta_spread=1.0,
+            gamma_pod_headroom=0.0,
+            delta_frag_penalty=0.0,
+        )
+        n_light = _node(cpu_used=20.0, memory_used=20_000.0)
+        n_heavy = _node(cpu_used=80.0, memory_used=80_000.0)
+
+        # Spread: light wins
+        assert score_node(n_light, weights, strategy=PlacementStrategy.SPREAD) > score_node(
+            n_heavy, weights, strategy=PlacementStrategy.SPREAD
+        )
+        # Consolidate: heavy wins
+        assert score_node(n_heavy, weights, strategy=PlacementStrategy.CONSOLIDATE) > score_node(
+            n_light, weights, strategy=PlacementStrategy.CONSOLIDATE
+        )
+
+    def test_default_strategy_is_spread(self) -> None:
+        """score_node without strategy kwarg uses spread (backward compat)."""
+        weights = AlgorithmWeights()
+        n = _node(cpu_used=50.0, memory_used=50_000.0, pods_used=50)
+        assert score_node(n, weights) == score_node(n, weights, strategy=PlacementStrategy.SPREAD)
 
     def test_score_is_deterministic(self) -> None:
         """Same inputs always produce the same score."""

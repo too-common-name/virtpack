@@ -44,7 +44,9 @@ class ClusterState:
     def __init__(self, nodes: list[Node] | None = None) -> None:
         self._nodes: list[Node] = list(nodes) if nodes else []
         self._placement_map: dict[str, str] = {}
-        self._node_vm_map: dict[str, list[str]] = {n.id: [] for n in self._nodes}
+        # dict[str, None] instead of list[str]: O(1) delete in unplace()
+        # (list.remove is O(k) per node). Keys stay insertion-ordered.
+        self._node_vm_map: dict[str, dict[str, None]] = {n.id: {} for n in self._nodes}
         self._vm_registry: dict[str, VM] = {}
 
     # ── Node management ──────────────────────────────────────────────
@@ -62,12 +64,12 @@ class ClusterState:
     @property
     def node_vm_map(self) -> dict[str, list[str]]:
         """Read-only view: ``node_id → [vm_names]`` for every node."""
-        return {nid: list(vms) for nid, vms in self._node_vm_map.items()}
+        return {nid: list(vms.keys()) for nid, vms in self._node_vm_map.items()}
 
     def add_node(self, node: Node) -> None:
         """Register a new node (used by Expander for catalog nodes)."""
         self._nodes.append(node)
-        self._node_vm_map[node.id] = []
+        self._node_vm_map[node.id] = {}
 
     # ── O(1) place / unplace ─────────────────────────────────────────
 
@@ -82,7 +84,7 @@ class ClusterState:
         node.memory_used += vm.memory_mb
         node.pods_used += vm.pods
         self._placement_map[vm.name] = node.id
-        self._node_vm_map[node.id].append(vm.name)
+        self._node_vm_map[node.id][vm.name] = None
         self._vm_registry[vm.name] = vm
 
     def unplace(self, vm: VM, node: Node) -> None:
@@ -95,7 +97,7 @@ class ClusterState:
         node.memory_used -= vm.memory_mb
         node.pods_used -= vm.pods
         del self._placement_map[vm.name]
-        self._node_vm_map[node.id].remove(vm.name)
+        del self._node_vm_map[node.id][vm.name]
         del self._vm_registry[vm.name]
 
     # ── Filtering ────────────────────────────────────────────────────
@@ -112,7 +114,7 @@ class ClusterState:
 
     def get_node_vms(self, node_id: str) -> list[VM]:
         """Return the actual VM objects placed on *node_id*."""
-        return [self._vm_registry[name] for name in self._node_vm_map.get(node_id, [])]
+        return [self._vm_registry[name] for name in self._node_vm_map.get(node_id, {})]
 
     @property
     def inventory_nodes(self) -> list[Node]:

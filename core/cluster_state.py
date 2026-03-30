@@ -39,12 +39,13 @@ class ClusterState:
         ``node.id → [vm.name, ...]`` for auditing / CSV export.
     """
 
-    __slots__ = ("_node_vm_map", "_nodes", "_placement_map")
+    __slots__ = ("_node_vm_map", "_nodes", "_placement_map", "_vm_registry")
 
     def __init__(self, nodes: list[Node] | None = None) -> None:
         self._nodes: list[Node] = list(nodes) if nodes else []
         self._placement_map: dict[str, str] = {}
         self._node_vm_map: dict[str, list[str]] = {n.id: [] for n in self._nodes}
+        self._vm_registry: dict[str, VM] = {}
 
     # ── Node management ──────────────────────────────────────────────
 
@@ -82,6 +83,7 @@ class ClusterState:
         node.pods_used += vm.pods
         self._placement_map[vm.name] = node.id
         self._node_vm_map[node.id].append(vm.name)
+        self._vm_registry[vm.name] = vm
 
     def unplace(self, vm: VM, node: Node) -> None:
         """Reverse a placement — O(1) rollback.
@@ -94,6 +96,7 @@ class ClusterState:
         node.pods_used -= vm.pods
         del self._placement_map[vm.name]
         self._node_vm_map[node.id].remove(vm.name)
+        del self._vm_registry[vm.name]
 
     # ── Filtering ────────────────────────────────────────────────────
 
@@ -106,6 +109,10 @@ class ClusterState:
         return [n for n in self._nodes if n.fits(vm)]
 
     # ── Query helpers (for reporting / HA injection) ─────────────────
+
+    def get_node_vms(self, node_id: str) -> list[VM]:
+        """Return the actual VM objects placed on *node_id*."""
+        return [self._vm_registry[name] for name in self._node_vm_map.get(node_id, [])]
 
     @property
     def inventory_nodes(self) -> list[Node]:

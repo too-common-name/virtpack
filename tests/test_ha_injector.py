@@ -6,7 +6,9 @@ from core.cluster_state import ClusterState
 from core.ha_injector import (
     HARequirement,
     HAResult,
+    _simulate_failure,
     compute_current_spare,
+    compute_ha_deficit,
     compute_ha_requirements,
     inject_ha_nodes,
 )
@@ -207,6 +209,151 @@ class TestComputeCurrentSpare:
         spare_cpu, spare_mem = compute_current_spare(state)
         assert spare_cpu == 60.0
         assert spare_mem == 300_000.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# _simulate_failure
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSimulateFailure:
+    """Tests for the greedy first-fit re-placement simulation."""
+
+    def test_no_displaced_vms(self) -> None:
+        """No VMs to re-place → zero deficit."""
+        n1 = _inv_node(index=1)
+        assert _simulate_failure([n1], []) == (0.0, 0.0)
+
+    def test_all_vms_fit(self) -> None:
+        """Survivors have plenty of room → zero deficit."""
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0)
+        vms = [_vm("v1", cpu=5.0, memory_mb=10_000.0)]
+        assert _simulate_failure([n1], vms) == (0.0, 0.0)
+
+    def test_no_survivors(self) -> None:
+        """No surviving nodes → all VMs are unplaced."""
+        vms = [_vm("v1", cpu=5.0, memory_mb=10_000.0)]
+        d_cpu, d_mem = _simulate_failure([], vms)
+        assert d_cpu == 5.0
+        assert d_mem == 10_000.0
+
+    def test_partial_fit(self) -> None:
+        """Some VMs fit, others don't."""
+        n1 = _inv_node(index=1, cpu_total=10.0, memory_total=50_000.0)
+        vms = [
+            _vm("big", cpu=8.0, memory_mb=40_000.0),
+            _vm("small", cpu=5.0, memory_mb=20_000.0),
+        ]
+        d_cpu, d_mem = _simulate_failure([n1], vms)
+        assert d_cpu == 5.0
+        assert d_mem == 20_000.0
+
+    def test_stranded_cpu_not_counted(self) -> None:
+        """CPU free but memory full → VMs cannot land there."""
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=50_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("filler", cpu=10.0, memory_mb=50_000.0), n1)
+
+        displaced = [_vm("v1", cpu=5.0, memory_mb=10_000.0)]
+        d_cpu, d_mem = _simulate_failure([n1], displaced)
+        assert d_cpu == 5.0
+        assert d_mem == 10_000.0
+
+    def test_stranded_mem_not_counted(self) -> None:
+        """Memory free but CPU full → VMs cannot land there."""
+        n1 = _inv_node(index=1, cpu_total=10.0, memory_total=400_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("filler", cpu=10.0, memory_mb=1000.0), n1)
+
+        displaced = [_vm("v1", cpu=2.0, memory_mb=5_000.0)]
+        d_cpu, d_mem = _simulate_failure([n1], displaced)
+        assert d_cpu == 2.0
+        assert d_mem == 5_000.0
+
+    def test_spreads_across_multiple_survivors(self) -> None:
+        """VMs spread across multiple survivors when one fills up."""
+        n1 = _inv_node(index=1, cpu_total=10.0, memory_total=50_000.0)
+        n2 = _inv_node(index=2, cpu_total=10.0, memory_total=50_000.0)
+        vms = [
+            _vm("v1", cpu=8.0, memory_mb=40_000.0),
+            _vm("v2", cpu=8.0, memory_mb=40_000.0),
+        ]
+        d_cpu, d_mem = _simulate_failure([n1, n2], vms)
+        assert d_cpu == 0.0
+        assert d_mem == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# compute_ha_deficit
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestComputeHADeficit:
+    """Tests for the simulation-based HA deficit computation."""
+
+    def test_zero_failures(self) -> None:
+        state = ClusterState([_inv_node()])
+        assert compute_ha_deficit(state, 0) == (0.0, 0.0)
+
+    def test_no_active_nodes(self) -> None:
+        state = ClusterState([_inv_node()])
+        assert compute_ha_deficit(state, 1) == (0.0, 0.0)
+
+    def test_single_failure_sufficient_spare(self) -> None:
+        """Two large nodes, one lightly loaded → surviving node absorbs VMs."""
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=400_000.0)
+        n2 = _inv_node(index=2, cpu_total=100.0, memory_total=400_000.0)
+        state = ClusterState([n1, n2])
+        state.place(_vm("small", cpu=5.0, memory_mb=10_000.0), n1)
+
+        assert compute_ha_deficit(state, 1) == (0.0, 0.0)
+
+    def test_single_failure_deficit(self) -> None:
+        """Single tight node → failure loses everything, no survivors absorb."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        d_cpu, d_mem = compute_ha_deficit(state, 1)
+        assert d_cpu == 45.0
+        assert d_mem == 90_000.0
+
+    def test_two_failures_worst_case(self) -> None:
+        """N=2: checks all pairs, returns worst scenario."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        n2 = _inv_node(index=2, cpu_total=50.0, memory_total=100_000.0)
+        n3 = _inv_node(index=3, cpu_total=50.0, memory_total=100_000.0)
+        state = ClusterState([n1, n2, n3])
+        state.place(_vm("a", cpu=40.0, memory_mb=90_000.0), n1)
+        state.place(_vm("b", cpu=35.0, memory_mb=80_000.0), n2)
+        state.place(_vm("c", cpu=5.0, memory_mb=10_000.0), n3)
+
+        d_cpu, d_mem = compute_ha_deficit(state, 2)
+        assert d_cpu > 0.0 or d_mem > 0.0
+
+    def test_empty_ha_node_provides_capacity(self) -> None:
+        """An empty HA node in the state provides absorption capacity."""
+        n1 = _inv_node(index=1, cpu_total=50.0, memory_total=100_000.0)
+        n_ha = _inv_node(index=2, cpu_total=100.0, memory_total=400_000.0)
+        state = ClusterState([n1, n_ha])
+        state.place(_vm("big", cpu=45.0, memory_mb=90_000.0), n1)
+
+        assert compute_ha_deficit(state, 1) == (0.0, 0.0)
+
+    def test_stranded_capacity_causes_deficit(self) -> None:
+        """Regression: stranded CPU on memory-full node must NOT satisfy HA.
+
+        Old code summed spare independently → reported 0 deficit.
+        Simulation detects the VM cannot actually be rescheduled.
+        """
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=100_000.0)
+        n2 = _inv_node(index=2, cpu_total=100.0, memory_total=100_000.0)
+        state = ClusterState([n1, n2])
+        state.place(_vm("cpu-light-mem-heavy", cpu=10.0, memory_mb=90_000.0), n1)
+        state.place(_vm("fills-n2-mem", cpu=10.0, memory_mb=95_000.0), n2)
+
+        d_cpu, d_mem = compute_ha_deficit(state, 1)
+        assert d_cpu > 0.0 or d_mem > 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -497,3 +644,29 @@ class TestUnusedPoolReclamation:
         # Some nodes reclaimed, remainder can be shut down
         assert len(pool) < 3  # at least 1 reclaimed
         assert len(pool) >= 0  # some may remain
+
+    def test_stranded_capacity_triggers_reclaim(self) -> None:
+        """Regression: stranded CPU on memory-full survivors must trigger HA.
+
+        Scenario: 2 active nodes, both memory-heavy.  If either fails,
+        its 90 GB VM cannot land on the other (only 5 GB free).  The old
+        independent-sum code saw 180 spare CPU and thought HA was fine.
+        The simulation correctly detects the VM cannot be rescheduled.
+        """
+        n1 = _inv_node(index=1, cpu_total=100.0, memory_total=100_000.0)
+        n2 = _inv_node(index=2, cpu_total=100.0, memory_total=100_000.0)
+        state = ClusterState([n1, n2])
+        state.place(_vm("a", cpu=10.0, memory_mb=95_000.0), n1)
+        state.place(_vm("b", cpu=10.0, memory_mb=95_000.0), n2)
+
+        spare = _inv_node(index=10, cpu_total=100.0, memory_total=400_000.0)
+        pool = [spare]
+
+        result = inject_ha_nodes(
+            state=state,
+            config=_config(ha_failures=1),
+            unused_pool=pool,
+        )
+
+        assert result.fully_covered is True
+        assert len(result.nodes_reclaimed) >= 1

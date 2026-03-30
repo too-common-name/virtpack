@@ -348,6 +348,47 @@ class TestGetCandidateNodes:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+class TestGetNodeVMs:
+    """Tests for get_node_vms() — resolves VM names to VM objects."""
+
+    def test_returns_placed_vms(self) -> None:
+        node = _node("n1")
+        state = ClusterState([node])
+        v1 = _vm("v1", cpu=2.0, memory_mb=8000.0)
+        v2 = _vm("v2", cpu=4.0, memory_mb=16000.0)
+        state.place(v1, node)
+        state.place(v2, node)
+
+        result = state.get_node_vms("n1")
+        assert len(result) == 2
+        assert result[0].name == "v1"
+        assert result[0].cpu == 2.0
+        assert result[1].name == "v2"
+        assert result[1].memory_mb == 16000.0
+
+    def test_empty_node_returns_empty(self) -> None:
+        node = _node("n1")
+        state = ClusterState([node])
+        assert state.get_node_vms("n1") == []
+
+    def test_unknown_node_returns_empty(self) -> None:
+        state = ClusterState()
+        assert state.get_node_vms("nonexistent") == []
+
+    def test_unplace_removes_from_registry(self) -> None:
+        node = _node("n1")
+        state = ClusterState([node])
+        v1 = _vm("v1", cpu=2.0, memory_mb=8000.0)
+        v2 = _vm("v2", cpu=4.0, memory_mb=16000.0)
+        state.place(v1, node)
+        state.place(v2, node)
+        state.unplace(v1, node)
+
+        result = state.get_node_vms("n1")
+        assert len(result) == 1
+        assert result[0].name == "v2"
+
+
 class TestQueryHelpers:
     def test_inventory_vs_catalog_nodes(self) -> None:
         inv = _node("inv-01", is_inventory=True)

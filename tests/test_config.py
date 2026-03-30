@@ -57,13 +57,13 @@ class TestAlgorithmWeights:
 
     def test_defaults_sum_to_one(self) -> None:
         w = AlgorithmWeights()
-        total = w.alpha_balance + w.beta_spread + w.gamma_pod_headroom + w.delta_frag_penalty
+        total = w.alpha_balance + w.beta_alloc + w.gamma_pod_headroom + w.delta_frag_penalty
         assert total == pytest.approx(1.0)
 
     def test_custom_weights_summing_to_one(self) -> None:
         w = AlgorithmWeights(
             alpha_balance=0.25,
-            beta_spread=0.25,
+            beta_alloc=0.25,
             gamma_pod_headroom=0.25,
             delta_frag_penalty=0.25,
         )
@@ -73,7 +73,7 @@ class TestAlgorithmWeights:
         with pytest.raises(ValidationError, match=r"sum to 1\.0"):
             AlgorithmWeights(
                 alpha_balance=0.5,
-                beta_spread=0.5,
+                beta_alloc=0.5,
                 gamma_pod_headroom=0.5,
                 delta_frag_penalty=0.5,
             )
@@ -82,7 +82,7 @@ class TestAlgorithmWeights:
         with pytest.raises(ValidationError, match=r"sum to 1\.0"):
             AlgorithmWeights(
                 alpha_balance=0.1,
-                beta_spread=0.1,
+                beta_alloc=0.1,
                 gamma_pod_headroom=0.1,
                 delta_frag_penalty=0.1,
             )
@@ -91,7 +91,7 @@ class TestAlgorithmWeights:
         with pytest.raises(ValidationError):
             AlgorithmWeights(
                 alpha_balance=-0.1,
-                beta_spread=0.4,
+                beta_alloc=0.4,
                 gamma_pod_headroom=0.3,
                 delta_frag_penalty=0.4,
             )

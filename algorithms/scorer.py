@@ -134,7 +134,7 @@ def score_node(
     alloc = pack_score(node) if strategy == PlacementStrategy.CONSOLIDATE else spread_score(node)
     return (
         weights.alpha_balance * balance_score(node)
-        + weights.beta_spread * alloc
+        + weights.beta_alloc * alloc
         + weights.gamma_pod_headroom * pod_headroom_score(node)
         - weights.delta_frag_penalty * fragmentation_penalty(node)
     )

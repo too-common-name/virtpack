@@ -178,7 +178,7 @@ safety_margins:
 algorithm_weights:
   # Weights must sum to 1.0
   alpha_balance: 0.3     # CPU/memory proportionality
-  beta_spread: 0.3       # LeastAllocated (distribute VMs)
+  beta_alloc: 0.3       # LeastAllocated (distribute VMs)
   gamma_pod_headroom: 0.1  # pod slot availability
   delta_frag_penalty: 0.3  # stranded capacity penalty
 

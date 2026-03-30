@@ -116,7 +116,7 @@ class TestScoreCandidates:
         """With spread-only weights, the lighter node wins."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=1.0,
+            beta_alloc=1.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )
@@ -178,7 +178,7 @@ class TestScoreCandidates:
         """
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=0.0,
+            beta_alloc=0.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=1.0,
         )
@@ -209,7 +209,7 @@ class TestScoreCandidates:
         """With consolidate strategy + spread-only weights, the heavier node wins."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=1.0,
+            beta_alloc=1.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )

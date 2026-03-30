@@ -76,7 +76,7 @@ safety_margins:
   ha_failures_to_tolerate: 2
 algorithm_weights:
   alpha_balance: 0.25
-  beta_spread: 0.25
+  beta_alloc: 0.25
   gamma_pod_headroom: 0.25
   delta_frag_penalty: 0.25
 """
@@ -112,7 +112,7 @@ algorithm_weights:
         content = """\
 algorithm_weights:
   alpha_balance: 0.9
-  beta_spread: 0.9
+  beta_alloc: 0.9
   gamma_pod_headroom: 0.9
   delta_frag_penalty: 0.9
 """

@@ -233,7 +233,7 @@ class TestScoreNode:
         """All weights equal (0.25 each) on an empty node."""
         weights = AlgorithmWeights(
             alpha_balance=0.25,
-            beta_spread=0.25,
+            beta_alloc=0.25,
             gamma_pod_headroom=0.25,
             delta_frag_penalty=0.25,
         )
@@ -246,7 +246,7 @@ class TestScoreNode:
         """Only balance weight active — verify isolation."""
         weights = AlgorithmWeights(
             alpha_balance=1.0,
-            beta_spread=0.0,
+            beta_alloc=0.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )
@@ -257,7 +257,7 @@ class TestScoreNode:
         """A fuller node scores lower on spread than a less-used one."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=1.0,
+            beta_alloc=1.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )
@@ -270,7 +270,7 @@ class TestScoreNode:
         when delta_frag_penalty is active."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=0.0,
+            beta_alloc=0.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=1.0,
         )
@@ -285,7 +285,7 @@ class TestScoreNode:
         """In consolidate mode, a fuller node scores higher on the alloc component."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=1.0,
+            beta_alloc=1.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )
@@ -299,7 +299,7 @@ class TestScoreNode:
         """spread favors light node; consolidate favors heavy node."""
         weights = AlgorithmWeights(
             alpha_balance=0.0,
-            beta_spread=1.0,
+            beta_alloc=1.0,
             gamma_pod_headroom=0.0,
             delta_frag_penalty=0.0,
         )

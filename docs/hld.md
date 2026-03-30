@@ -154,7 +154,7 @@ Contains cluster-wide limits, overcommit ratios, Red Hat baseline overheads, and
       
     algorithm_weights:
       alpha_balance: 0.3        # Favors nodes with proportional CPU/RAM usage
-      beta_spread: 0.3          # Favors the emptiest nodes (LeastAllocated)
+      beta_alloc: 0.3          # Favors the emptiest nodes (LeastAllocated)
       gamma_pod_headroom: 0.1   # Favors nodes with available pod IP space
       delta_frag_penalty: 0.3   # Penalizes dimensional imbalance in remaining capacity
 
@@ -190,7 +190,7 @@ The `algorithm_weights` are hyperparameters representing the operational philoso
 | Weight | Term | Signal |
 |--------|------|--------|
 | α `alpha_balance` | Balance | CPU/memory utilization should be proportional |
-| β `beta_spread` | Spread (LeastAllocated) | Distribute VMs across available nodes |
+| β `beta_alloc` | Spread (LeastAllocated) | Distribute VMs across available nodes |
 | γ `gamma_pod_headroom` | Pod headroom | Don't exhaust pod/IP slots |
 | δ `delta_frag_penalty` | Stranded capacity | Don't strand remaining capacity in one dimension |
 

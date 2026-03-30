@@ -175,11 +175,11 @@ class AlgorithmWeights(BaseModel):
         le=1.0,
         description="Weight: CPU/Memory balance (NodeResourcesBalancedAllocation)",
     )
-    beta_spread: float = Field(
+    beta_alloc: float = Field(
         default=0.3,
         ge=0,
         le=1.0,
-        description="Weight: spread / LeastAllocated preference",
+        description="Weight: allocation score (LeastAllocated / MostAllocated)",
     )
     gamma_pod_headroom: float = Field(
         default=0.1,
@@ -198,14 +198,14 @@ class AlgorithmWeights(BaseModel):
     def _weights_must_sum_to_one(self) -> Self:
         total = (
             self.alpha_balance
-            + self.beta_spread
+            + self.beta_alloc
             + self.gamma_pod_headroom
             + self.delta_frag_penalty
         )
         if not (0.99 <= total <= 1.01):
             raise ValueError(
                 f"Algorithm weights must sum to 1.0 (got {total:.4f}). "
-                f"Adjust alpha_balance, beta_spread, gamma_pod_headroom, "
+                f"Adjust alpha_balance, beta_alloc, gamma_pod_headroom, "
                 f"and delta_frag_penalty."
             )
         return self

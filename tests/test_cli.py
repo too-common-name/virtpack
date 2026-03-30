@@ -109,7 +109,7 @@ safety_margins:
   ha_failures_to_tolerate: 0
 algorithm_weights:
   alpha_balance: 0.3
-  beta_spread: 0.3
+  beta_alloc: 0.3
   gamma_pod_headroom: 0.1
   delta_frag_penalty: 0.3
 """
@@ -239,7 +239,7 @@ safety_margins:
   ha_failures_to_tolerate: 0
 algorithm_weights:
   alpha_balance: 0.3
-  beta_spread: 0.3
+  beta_alloc: 0.3
   gamma_pod_headroom: 0.1
   delta_frag_penalty: 0.3
 """
@@ -363,7 +363,7 @@ safety_margins:
   ha_failures_to_tolerate: 0
 algorithm_weights:
   alpha_balance: 0.3
-  beta_spread: 0.3
+  beta_alloc: 0.3
   gamma_pod_headroom: 0.1
   delta_frag_penalty: 0.3
 """

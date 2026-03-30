@@ -69,7 +69,7 @@ safety_margins:
 algorithm_weights:
   # Weights must sum to 1.0
   alpha_balance: 0.3       # CPU/Memory balance
-  beta_spread: 0.3         # LeastAllocated (even distribution)
+  beta_alloc: 0.3         # LeastAllocated (even distribution)
   gamma_pod_headroom: 0.1  # Pod IP headroom
   delta_frag_penalty: 0.3  # Stranded capacity penalty
 
